@@ -89,7 +89,7 @@ class StateTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 state.read(directory)
 
-    def test_fixed_pending_slot_recovers_from_repeated_kills(self):
+    def test_fixed_pending_slot_reuses_interrupted_write_simulation(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / ".state.pending"
             for _ in range(3):

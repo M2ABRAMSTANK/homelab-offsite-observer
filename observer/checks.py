@@ -82,7 +82,7 @@ def negative(response, spec):
         return None
     if spec["expected"] == "http_denial":
         return response.kind == "http" and response.status in spec["statuses"]
-    return response.kind == spec["expected"]
+    return response.status == 0 and response.kind == spec["expected"]
 
 
 def utc(now):

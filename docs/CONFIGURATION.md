@@ -71,8 +71,10 @@ is unhealthy. No raw database access or general metrics export is supported.
 
 Negative checks specify **one exact expected class**, not a collection of generic
 curl failures. `http_denial` accepts only the listed 4xx status after verified
-TLS. `post_tls_eof` requires no HTTP status and an EOF after verified TLS;
-`post_tls_reset` requires a reset after verified TLS. A different abort class
+TLS. `post_tls_eof` requires no HTTP response bytes and an EOF after verified TLS;
+`post_tls_reset` requires a reset after verified TLS with no HTTP response bytes.
+Status/partial-status followed by an abort is malformed/inconclusive and never passes.
+A different abort class
 fails an eligible check. TLS/DNS/pre-TLS connection failure and timeout are
 inconclusive. Fixture results do not prove the real edge's expected behavior;
 its exact behavior must be independently measured and configured.

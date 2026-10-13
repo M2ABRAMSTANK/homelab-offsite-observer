@@ -43,8 +43,10 @@ class ChecksTests(unittest.TestCase):
         self.assertFalse(negative(Response("http", tls=True, status=200), eof))
         self.assertFalse(negative(Response("post_tls_reset", tls=True), eof))
         for response in [Response("post_tls_eof"), Response("tls_error"), Response("network_error"),
-                         Response("timeout", tls=True), Response("invalid_response", tls=True)]:
+                         Response("timeout", tls=True)]:
             self.assertIsNone(negative(response, eof))
+        self.assertIsNone(negative(Response("invalid_response", tls=True), eof))
+        self.assertFalse(negative(Response("post_tls_eof", tls=True, status=200), eof))
         denial = {"expected": "http_denial", "statuses": [403]}
         self.assertTrue(negative(Response("http", tls=True, status=403), denial))
         self.assertFalse(negative(Response("http", tls=True, status=404), denial))

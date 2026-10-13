@@ -63,9 +63,12 @@ bounded nonnegative counts, `queue.ready=true`, and a configured queue-age ceili
 
 Negative checks run only after both same-cycle public readiness and freshness
 pass. They require verified TLS followed by the exact configured 4xx denial,
-post-TLS EOF, or post-TLS reset. A successful TCP connect, TLS error, pre-TLS
+post-TLS EOF, or post-TLS reset with **no HTTP response bytes**. Received HTTP
+bytes followed by truncation/abort are inconclusive, never expected denial.
+A successful TCP connect, TLS error, pre-TLS
 reset, DNS error or timeout never proves denial. Unexpected verified-TLS HTTP
-or the wrong configured post-handshake abort fails the exposure check. An
+or the wrong configured post-handshake abort fails the exposure check. A malformed
+verified-TLS response is inconclusive. An
 inconclusive transport failure preserves the exposure streak; it does not page
 as a new exposure incident. Negative response bodies are not read.
 

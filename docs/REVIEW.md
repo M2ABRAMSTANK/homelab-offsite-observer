@@ -21,8 +21,8 @@ Reproduce `make test` and `make demo`. The suite exercises:
   recovery, inconclusive exposure streak retention, outage negative suppression.
 - Child-process timeout/cleanup, default dry-run without request/state calls,
   disabled live execution, fixed error output and evidence without body/token.
-- Atomic state, owner/mode, symlink/hardlink rejection, fixed-slot crash recovery,
-  no overlap, non-finite timestamp/corruption refusal,
+- Atomic state, owner/mode, symlink/hardlink rejection, interrupted fixed-slot
+  recovery simulation, no overlap, non-finite timestamp/corruption refusal,
   count/size/age spool limits, 24-hour dedup and bounded retry delay.
 
 Tests use a fresh implementation, so there is no preexisting production version

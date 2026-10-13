@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 import http.client
 import ipaddress
+import io
 import socket
 import ssl
 import struct
@@ -85,9 +86,11 @@ class LimitedFile:
     def __init__(self, fp):
         self.fp = fp
         self.header_bytes = 0
+        self.last_header_line = None
 
     def readline(self, limit=-1):
         value = self.fp.readline(min(8193, limit) if limit > 0 else 8193)
+        self.last_header_line = value
         self.header_bytes += len(value)
         if len(value) > 8192 or self.header_bytes > 16384:
             raise ValueError("headers too large")
@@ -106,18 +109,42 @@ class LimitedFile:
         self.fp.close()
 
 
+class CapturedRaw(io.RawIOBase):
+    """Remember plaintext arrival even if BufferedReader raises before returning a line."""
+    def __init__(self, sock, stream):
+        super().__init__()
+        self.sock = sock
+        self.stream = stream
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        count = self.sock.recv_into(buffer)
+        if count:
+            self.stream.received = True
+        return count
+
+
 class HTTPStream:
     def __init__(self, sock):
         self.sock = sock
+        self.received = False
 
     def makefile(self, *args, **kwargs):
-        return LimitedFile(self.sock.makefile(*args, **kwargs))
+        self.file = LimitedFile(io.BufferedReader(CapturedRaw(self.sock, self)))
+        return self.file
 
 
 def request(url, *, timeout=8, headers=None, payload=None, proxy=None, negative=False):
     started = time.monotonic()
     result = Response("network_error")
-    raw = secured = response = None
+    raw = secured = response = stream = None
+    def abort_kind(verified_kind, unverified_kind):
+        parsed = response and type(response.status) is int and 100 <= response.status <= 599
+        if (stream and stream.received) or parsed:
+            return "invalid_response"
+        return verified_kind if result.tls else unverified_kind
     try:
         host, port, path = endpoint(url)
         # Direct public probes never use HTTP(S)_PROXY or ALL_PROXY environment values.
@@ -138,9 +165,14 @@ def request(url, *, timeout=8, headers=None, payload=None, proxy=None, negative=
         method = "POST" if payload is not None else "GET"
         wire = f"{method} {path} HTTP/1.1\r\n" + "".join(f"{k}: {v}\r\n" for k, v in fields.items()) + "\r\n"
         secured.sendall(wire.encode("ascii") + (payload or b""))
-        response = http.client.HTTPResponse(HTTPStream(secured))
+        stream = HTTPStream(secured)
+        response = http.client.HTTPResponse(stream)
         response.begin()
         result.status = response.status
+        # http.client accepts EOF as the end of headers; denial needs a real
+        # blank-line terminator, not a truncated status/header stream.
+        if stream.file.last_header_line not in (b"\r\n", b"\n"):
+            raise ValueError("truncated headers")
         # Duplicate headers are rejected rather than silently overriding freshness controls.
         pairs = response.getheaders()
         if len({k.lower() for k, _ in pairs}) != len(pairs):
@@ -155,11 +187,11 @@ def request(url, *, timeout=8, headers=None, payload=None, proxy=None, negative=
         if len(result.body) > MAX_BODY:
             raise ValueError("body too large")
     except http.client.RemoteDisconnected:
-        result.kind = "post_tls_eof" if result.tls else "network_error"
+        result.kind = abort_kind("post_tls_eof", "network_error")
     except ssl.SSLEOFError:
-        result.kind = "post_tls_eof" if result.tls else "tls_error"
+        result.kind = abort_kind("post_tls_eof", "tls_error")
     except ConnectionResetError:
-        result.kind = "post_tls_reset" if result.tls else "network_error"
+        result.kind = abort_kind("post_tls_reset", "network_error")
     except (TimeoutError, socket.timeout):
         result.kind = "timeout"
     except ssl.SSLError:
@@ -169,6 +201,8 @@ def request(url, *, timeout=8, headers=None, payload=None, proxy=None, negative=
     except OSError:
         result.kind = "network_error"
     finally:
+        if response and type(response.status) is int and 100 <= response.status <= 599:
+            result.status = response.status
         if response:
             response.close()
         if secured:

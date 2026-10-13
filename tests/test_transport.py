@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from observer.transport import endpoint, request, socks_connect, MAX_BODY
+from observer.checks import negative
 
 
 class FakeSocks:
@@ -42,7 +43,7 @@ class TransportTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.temp.cleanup()
 
-    def serve(self, wire, *, negative=False, hostname="localhost", trusted=True, tls=True):
+    def serve(self, wire, *, negative=False, hostname="localhost", trusted=True, tls=True, tls12=False, clean_close=False):
         client, raw = socket.socketpair()
         client.settimeout(1)
         errors = []
@@ -52,13 +53,15 @@ class TransportTests(unittest.TestCase):
                     if not tls:
                         return
                     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                    if tls12:
+                        context.maximum_version = ssl.TLSVersion.TLSv1_2
                     context.load_cert_chain(self.cert, self.key)
                     with context.wrap_socket(raw, server_side=True) as secured:
                         secured.settimeout(2)
                         secured.recv(8192)
                         if wire:
                             secured.sendall(wire)
-                        else:
+                        if not wire or clean_close:
                             # Send a real TLS close_notify; socketpair abrupt close can
                             # surface as EPIPE during TLS 1.3 post-handshake processing.
                             secured.unwrap().close()
@@ -115,6 +118,31 @@ class TransportTests(unittest.TestCase):
                     "https://edge.example.invalid/#secret", "https://[::1]/"]:
             with self.assertRaises(ValueError):
                 endpoint(url)
+
+    def test_http_status_or_partial_status_then_abort_cannot_prove_denial(self):
+        spec = {"expected": "post_tls_eof", "statuses": []}
+        for wire in [b"HTTP/1.1 200 OK\r\n", b"HTTP/1.1 20", b"not HTTP\r\n"]:
+            response = self.serve(wire, negative=True, tls12=True)
+            self.assertTrue(response.tls)
+            self.assertIsNone(negative(response, spec))
+            self.assertNotIn(response.kind, {"post_tls_eof", "post_tls_reset"})
+        response = self.serve(b"HTTP/1.1 403 Forbidden\r\n", negative=True, tls12=True, clean_close=True)
+        self.assertEqual(response.kind, "invalid_response")
+        self.assertIsNone(negative(response, {"expected": "http_denial", "statuses": [403]}))
+
+    def test_parsed_200_then_eof_or_reset_regression(self):
+        spec = {"expected": "post_tls_eof", "statuses": []}
+        for error in [ssl.SSLEOFError("fixture"), ConnectionResetError("fixture")]:
+            with patch("observer.transport.socket.create_connection"), \
+                    patch("observer.transport.ssl.create_default_context"), \
+                    patch("observer.transport.http.client.HTTPResponse") as parser:
+                parser.return_value.status = 200
+                parser.return_value.begin.side_effect = error
+                response = request("https://edge.example.invalid/fixture", negative=True)
+            self.assertTrue(response.tls)
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.kind, "invalid_response")
+            self.assertIsNone(negative(response, spec))
         for url in ["https://127.0.0.1/", "https://edge.example.invalid:0/"]:
             with self.assertRaises(ValueError):
                 endpoint(url)
