@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "enabled": false,
+  "observer_id": "offsite-review",
+  "readiness": {
+    "url": "https://edge.example.invalid/health",
+    "expected": {"status": "ok"}
+  },
+  "freshness": {"url": "https://edge.example.invalid/v1/observer/canary"},
+  "negative": [
+    {"name": "metrics", "url": "https://edge.example.invalid/metrics", "expected": "http_denial", "statuses": [403]},
+    {"name": "private_api", "url": "https://private-api.example.invalid/health", "expected": "post_tls_eof", "statuses": []}
+  ],
+  "private": {
+    "enabled": false,
+    "url": "https://heartbeat.example.invalid/v1/observer/heartbeat",
+    "socks_port": 1055,
+    "max_pending_seconds": 60
+  },
+  "provider": {
+    "heartbeat_url": "https://provider.example.invalid/v1/heartbeats",
+    "events_url": "https://provider.example.invalid/v1/events",
+    "contract_verified": false
+  }
+}

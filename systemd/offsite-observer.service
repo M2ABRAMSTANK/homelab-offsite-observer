@@ -1,0 +1,47 @@
+[Unit]
+Description=Outbound off-site observer (explicit activation required)
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target
+
+[Service]
+Type=oneshot
+User=offsite-observer
+Group=offsite-observer
+WorkingDirectory=/opt/offsite-observer
+ExecStart=/usr/bin/python3 -B -m observer --config %d/config --state-dir /var/lib/offsite-observer --live
+LoadCredential=config:/etc/offsite-observer/config.json
+LoadCredential=provider_token:/etc/offsite-observer/provider.token
+# Add the optional private_token LoadCredential only when enabling private checks.
+StateDirectory=offsite-observer
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SocketBindDeny=any
+SystemCallFilter=~@mount @reboot @swap @raw-io @privileged
+ReadWritePaths=/var/lib/offsite-observer
+TimeoutStartSec=20s
+KillMode=control-group
+MemoryMax=256M
+CPUQuota=50%
+TasksMax=32
+LimitNOFILE=128
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=3
