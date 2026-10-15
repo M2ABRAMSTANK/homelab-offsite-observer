@@ -60,8 +60,9 @@ def validate(response, kind, *, nonce="", now=0, expected=None, max_age=60, cloc
                 and type(queue["ready"]) is bool and queue["ready"]
                 and integer(queue["active"])
                 and type(queue["oldest_pending_seconds"]) in (int, float)
-                and math.isfinite(queue["oldest_pending_seconds"])
+                # Bound remote integers before math.isfinite converts them to float.
                 and 0 <= queue["oldest_pending_seconds"] <= max_age
+                and math.isfinite(queue["oldest_pending_seconds"])
                 and integer(data["security_alerts_firing"]))
     except (ValueError, TypeError, KeyError, RecursionError):
         return False

@@ -28,6 +28,14 @@ class ChecksTests(unittest.TestCase):
         self.assertTrue(validate(reply(canary()), "freshness", nonce=NONCE, now=NOW))
         self.assertTrue(validate(reply(heartbeat()), "private", nonce=NONCE, now=NOW))
 
+    def test_private_age_bounds_before_float_conversion(self):
+        for age, expected in [(0, True), (0.5, True), (60, True), (60.0, True),
+                              (60.5, False), (10**400, False), (-10**400, False)]:
+            with self.subTest(age=age):
+                data = heartbeat()
+                data["queue"]["oldest_pending_seconds"] = age
+                self.assertIs(validate(reply(data), "private", nonce=NONCE, now=NOW), expected)
+
     def test_nonce_stale_skew_untrusted_clock(self):
         for kind, data in [("freshness", canary()), ("private", heartbeat())]:
             self.assertFalse(validate(reply(data), kind, nonce="different", now=NOW))

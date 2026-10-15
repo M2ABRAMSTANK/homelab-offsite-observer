@@ -19,16 +19,20 @@ Reproduce `make test` and `make demo`. The suite exercises:
   and policy-refusal framing.
 - Three failures/two passes, independent incident machines, provider-gated
   recovery, inconclusive exposure streak retention, outage negative suppression.
+- Oversized private heartbeat ages are unhealthy without aborting a cycle;
+  three repeated malformed responses still persist incident streaks, run eligible
+  negative probes and deliver queued events, recoveries and new incidents.
 - Child-process timeout/cleanup, default dry-run without request/state calls,
   disabled live execution, fixed error output and evidence without body/token.
 - Atomic state, owner/mode, symlink/hardlink rejection, interrupted fixed-slot
   recovery simulation, no overlap, non-finite timestamp/corruption refusal,
   count/size/age spool limits, 24-hour dedup and bounded retry delay.
 
-Tests use a fresh implementation, so there is no preexisting production version
-for before/after comparison. A test must still fail if its protected check is
-removed or the acceptance condition is weakened. Local socket-pair TLS is source
-evidence; it does not emulate the hosting guest or public-network vantage.
+A test must fail if its protected check is removed or the acceptance condition is
+weakened. The oversized-age validator and cycle regressions were both reproduced
+as `OverflowError` failures on revision `84f377071e8ee79f19740e4cf53f24f38fe7845f`
+before moving the age bound ahead of float conversion. Local socket-pair TLS is
+source evidence; it does not emulate the hosting guest or public-network vantage.
 
 ## Required deployment inputs and independent evidence
 

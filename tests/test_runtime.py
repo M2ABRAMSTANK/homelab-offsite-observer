@@ -110,3 +110,57 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(evidence["incidents"]["edge_exposure"])
             self.assertFalse(evidence["incidents"]["wan_edge"])
             self.assertEqual(evidence["spool_events"], 0)
+
+    def test_oversized_private_age_preserves_incidents_and_event_delivery(self):
+        cfg = config.load(ROOT / "config.example.json")
+        cfg["private"]["enabled"] = True
+        now = 1_800_000_000
+        groups = []
+
+        def probes(jobs, timeout):
+            groups.append(set(jobs))
+            result = {}
+            for name, kw in jobs.items():
+                data = {"status": "ok"} if name == "readiness" else {
+                    "schema": 1, "nonce": kw.get("headers", {}).get("X-Observer-Nonce"),
+                    "generated_at": runner.utc(now)}
+                if name == "private":
+                    data.update(queue={"ready": True, "active": 0,
+                                       "oldest_pending_seconds": 10**400},
+                                security_alerts_firing=0)
+                # HTTP 200 on either negative target is unexpected public exposure.
+                result[name] = Response("http", tls=True, status=200,
+                                        headers={"cache-control": "no-store"}, body=json.dumps(data).encode())
+            return result
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("observer.runner.parallel", side_effect=probes), \
+                patch("observer.runner._provider", return_value=True) as provider, \
+                patch("observer.runner.clock_trusted", return_value=True), \
+                patch("observer.runner.time.time", return_value=now):
+            pending = state.empty()
+            for _ in range(3):
+                state.advance(pending, "wan_edge", False, now - 30)
+            queued_id = pending["events"][0]["id"]
+            state.write(directory, pending)
+            for count in range(1, 4):
+                evidence = runner.cycle(cfg, {"provider_token": "test-secret",
+                                              "private_token": "private-test-secret"}, directory)
+                persisted = state.read(directory)
+                self.assertIs(evidence["outcomes"]["private_queue"], False)
+                self.assertIs(evidence["outcomes"]["wan_edge"], True)
+                self.assertIs(evidence["outcomes"]["edge_exposure"], False)
+                for key in ("private_queue", "edge_exposure"):
+                    self.assertEqual(persisted["machines"][key]["fail"], count)
+                    self.assertEqual(persisted["machines"][key]["open"], count == 3)
+                self.assertEqual(evidence["events_delivered"], 2 if count == 3 else 1)
+                self.assertEqual(persisted["events"], [])
+            self.assertEqual(groups, [{"readiness", "freshness", "private"},
+                                      {spec["name"] for spec in cfg["negative"]}] * 3)
+            heartbeats = [call for call in provider.call_args_list if call.kwargs.get("heartbeat")]
+            events = [call.args[2] for call in provider.call_args_list if not call.kwargs.get("heartbeat")]
+            self.assertEqual(len(heartbeats), 3)
+            self.assertEqual(events[0]["id"], queued_id)
+            self.assertEqual([(event["key"], event["event"]) for event in events], [
+                ("wan_edge", "incident"), ("wan_edge", "recovery"),
+                ("private_queue", "incident"), ("edge_exposure", "incident")])
