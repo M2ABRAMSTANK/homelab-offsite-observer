@@ -54,3 +54,17 @@ does not send Telegram or perform containment/remediation.
 
 No redistribution license has been selected. Public review access does not imply
 a license grant; choose a license before promoting this as a reusable release.
+
+## Source workflow
+
+This independent repository is checked out as the `services/offsite-observer`
+submodule in its parent Homelab repository. GitLab is the primary repository
+(`origin`); GitLab pushes changes to this repository's GitHub mirror. Push source
+changes to `origin`, then verify mirror synchronization. The optional `github`
+remote is for inspection; routine changes go through GitLab.
+
+Commit service changes in this repository first, then update the parent
+repository's submodule pointer to the accepted commit. Keep private host details,
+credentials, deployment configuration and operational evidence outside this
+public source repository. A source push or submodule update does not activate
+monitoring or authorize a deployment.
