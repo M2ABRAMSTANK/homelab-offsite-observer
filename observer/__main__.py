@@ -27,7 +27,7 @@ def main(argv=None):
             raise ValueError("live activation and provider contract acceptance required")
         directory = os.environ.get("CREDENTIALS_DIRECTORY", "")
         if not directory or Path(args.config).resolve() != (Path(directory) / "config").resolve():
-            raise ValueError("live configuration must come from systemd LoadCredential")
+            raise ValueError("live configuration must match the protected credential copy")
         credentials = {"provider_token": config.token(directory, "provider_token")}
         if cfg["private"]["enabled"]:
             credentials["private_token"] = config.token(directory, "private_token")

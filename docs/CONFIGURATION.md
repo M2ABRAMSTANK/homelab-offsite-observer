@@ -31,7 +31,12 @@ All HTTPS endpoint paths must be URL-encoded ASCII. Ports default to 443 and can
 be explicitly configured from 1–65535. There is no certificate-verification bypass.
 Use the guest's root-managed trust store for a required private CA and verify it
 on the future guest. Live configuration must be named `config` in the systemd
-credential directory, not supplied from a writable checkout.
+credential directory, not supplied from a writable checkout. The CLI checks that
+path and the private credential files' ownership, mode, link count and contents;
+it does not verify that systemd created the directory. The supplied unit is the
+mechanism that uses `LoadCredential` for protected sources. A manual live
+invocation therefore lacks the unit's sandbox, deadline and resource limits and
+is not an activation procedure.
 
 ## Requests and exact responses
 
@@ -40,6 +45,15 @@ All probes are HTTP/1.1 HTTPS GETs with `Connection: close`,
 checks additionally send `X-Observer-Nonce` with a fresh 32-character lowercase
 hexadecimal nonce. The private check alone sends `Authorization: Bearer <token>`.
 No token is sent to a public readiness/freshness/negative URL.
+
+Responses carrying health JSON require complete, unambiguous HTTP framing before
+their bodies are interpreted. The header block must end with `\r\n\r\n`; malformed
+status/header syntax, duplicate headers, conflicting `Content-Length` and
+`Transfer-Encoding`, invalid lengths, unsupported transfer encodings, truncated
+content-length bodies, and incomplete chunked trailers are invalid responses.
+`Content-Length` is decimal and at most 20 digits. For health JSON, `chunked`
+accepts only 1–8 ASCII hexadecimal size digits, exact CRLF delimiters and a final
+zero chunk; chunk extensions and trailer fields are refused.
 
 Readiness passes only with HTTP 200 and the entire JSON object exactly matching
 `readiness.expected`, with JSON value types preserved. Select the real object's
@@ -71,7 +85,9 @@ is unhealthy. No raw database access or general metrics export is supported.
 
 Negative checks specify **one exact expected class**, not a collection of generic
 curl failures. `http_denial` accepts only the listed 4xx status after verified
-TLS. `post_tls_eof` requires no HTTP response bytes and an EOF after verified TLS;
+TLS with a well-formed HTTP/1.0 or HTTP/1.1 status line, valid complete headers,
+and unambiguous header framing. Its body is deliberately not read.
+`post_tls_eof` requires no HTTP response bytes and an EOF after verified TLS;
 `post_tls_reset` requires a reset after verified TLS with no HTTP response bytes.
 Status/partial-status followed by an abort is malformed/inconclusive and never passes.
 A different abort class
@@ -99,11 +115,18 @@ every cycle, even when clock trust or home checks fail:
 {"schema":1,"observer_id":"offsite-review","type":"heartbeat","at":"<UTC timestamp>","clock_trusted":true}
 ```
 
-The adapter must use its independent receive clock, require valid authentication
-and monitor every expected observer. Three missed nominal 30-second heartbeats
-must open `observer_host`/provider-path loss externally. Test timing tolerance,
-receipt deduplication and recovery. Never evaluate liveness from the sender's
-timestamp alone. Heartbeats are not replayed and do not join the local event spool.
+The acknowledgment proves only that the observer reached the pre-probe heartbeat
+stage and the adapter accepted it; it does not prove that probes, state writes,
+or incident delivery completed. The adapter must use its independent receive
+clock, require valid authentication and monitor every expected observer. Three
+missed nominal 30-second heartbeats must open `observer_host`/provider-path loss
+externally. Test timing tolerance, receipt deduplication and recovery. Never
+evaluate liveness from the sender's timestamp alone. Heartbeats are not replayed
+and do not join the local event spool. The local `provider_path` outcome measures
+`heartbeat_url` only: an accepted heartbeat can coexist with a failed
+`events_url`. Provider acceptance must inject that isolated event-path failure
+while heartbeats continue and prove independent adapter/fallback detection of
+undelivered events.
 
 An incident/recovery event has stable ID and idempotency key across retries:
 
@@ -113,11 +136,14 @@ An incident/recovery event has stable ID and idempotency key across retries:
 
 Keys are `wan_edge`, `edge_exposure`, `private_queue`, `clock` and `provider_path`.
 `event` is `incident` or `recovery`. The provider must deduplicate each event ID
-for at least 24 hours, preserve ordering, rate-limit the dedicated observer
-credential, and deliver incident/recovery to the operator-selected email and
+for at least 24 hours, preserve the order of received events, rate-limit the
+dedicated observer credential, and deliver incident/recovery to the
+operator-selected email and
 an independently configured fallback SMS/push path. A failed primary provider
 needs independent fallback monitoring; the local process cannot notify through
-a failed path. No recipient or credential is invented in this repository.
+a failed path. Events can expire or be dropped locally before delivery, so no
+global incident/recovery ordering or delivery guarantee exists. No recipient or
+credential is invented in this repository.
 
 ## Secrets and endpoint allowlist
 

@@ -87,7 +87,7 @@ def _provider(cfg, token, payload, identifier, deadline, heartbeat=False):
 
 def cycle(cfg, credentials, directory):
     deadline = time.monotonic() + BUDGET
-    state = read(directory)
+    state = read(directory, now=time.time())
     trusted = clock_trusted()
     now = time.time()
     # This heartbeat describes observer execution, even when every home check fails.
@@ -129,7 +129,7 @@ def cycle(cfg, credentials, directory):
     # Save before sending: a killed process may replay an event, never lose a newly opened incident.
     write(directory, state)
     delivered = 0
-    # Order-preserving queue: never deliver a recovery ahead of its incident.
+    # Preserve retained queue order; expiry can remove an undelivered incident.
     for event in list(state["events"]):
         if event["next"] > now or deadline - time.monotonic() < 0.3:
             break

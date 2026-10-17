@@ -63,8 +63,12 @@ sudo /usr/bin/python3 -B -m observer --config /etc/offsite-observer/config.json
 ```
 
 Run that command from `/opt/offsite-observer`. Never run the **live** service as
-root. The installed unit loads protected config/token sources into the private
-credential directory of `offsite-observer`.
+root. Use the supplied unit for live execution. It loads protected config/token
+sources into the private credential directory of `offsite-observer` with
+`LoadCredential` and supplies the sandbox, deadline and resource controls. The
+CLI checks a matching credential-directory path and secure file properties but
+does not prove systemd supplied them; direct manual `--live` is not an accepted
+activation or verification path.
 
 For private monitoring, install Tailscale separately from an approved upstream
 package. Configure its daemon for userspace operation and loopback-only proxy:
@@ -93,7 +97,9 @@ LoadCredential=private_token:/etc/offsite-observer/private.token
 Set `private.enabled: true`, the exact private HTTPS DNS target and the configured
 loopback SOCKS port. The optional daemon is outside the observer unit and needs
 its own constrained state, resource and backup policy. Do not pass it a host TUN
-device. If disabled, this project makes no private-health claim.
+device. If disabled, this project makes no private-health claim. Disabling it
+does not close an already open `private_queue` incident: it remains open in local
+state and can receive its 24-hour reminder while event delivery is available.
 
 ## Accept, enable, observe
 
@@ -112,7 +118,9 @@ sudo journalctl -u offsite-observer.service --since '-5 minutes'
 
 The service logs only reduced evidence. Exit 2 means clock/provider or runtime
 failure; home incident state is reported in JSON and does not make every healthy
-execution a failed unit. Inspect all outcomes and private-disabled status.
+execution a failed unit. A successful provider heartbeat means only that the
+pre-probe heartbeat was accepted, so inspect all outcomes, event delivery and
+private-disabled status.
 Unexpected sandbox/clock/credential errors are an activation stop. Verify no
 new public/inbound listening sockets, service UID/capabilities, writable paths,
 resource limits, timer non-overlap, configured latency and actual endpoint classes.
@@ -127,7 +135,11 @@ sudo systemctl list-timers offsite-observer.timer
 Only this explicit enable starts recurring traffic. Monitor `spool_dropped`,
 clock/provider failures and independent missing-heartbeat incidents. Deleting
 state forgets streaks/incidents; do not treat state as disposable during repairs.
-Before updates, disable timer, wait for the unit to stop, preserve state/config,
+If a backward clock step causes persisted-state validation to stop cycles before
+the heartbeat, preserve the state, correct and verify the actual clock, and
+investigate the discrepancy before recovery. The external dead-man should alert
+while no heartbeat is sent. Before updates, disable timer, wait for the unit to
+stop, preserve state/config,
 install the reviewed source and repeat acceptance without broadening privileges.
 
 ## Backup and isolated restore

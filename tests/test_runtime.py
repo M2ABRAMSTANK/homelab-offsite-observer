@@ -2,6 +2,7 @@ from contextlib import redirect_stdout, redirect_stderr
 import io
 import json
 import multiprocessing
+import os
 from pathlib import Path
 import tempfile
 import time
@@ -20,6 +21,27 @@ def hanging(**kwargs):
 
 
 class RuntimeTests(unittest.TestCase):
+    # Rejected live configurations must not read tokens or start a cycle.
+    def activation_config(self, *, enabled=True, contract_verified=True):
+        cfg = config.load(ROOT / "config.example.json")
+        cfg["enabled"] = enabled
+        cfg["provider"]["contract_verified"] = contract_verified
+        return cfg
+
+    def write_credential(self, directory, name, contents, *, mode=0o600):
+        path = Path(directory) / name
+        path.write_text(contents)
+        path.chmod(mode)
+        return path
+
+    def assert_live_refused(self, args, *, credentials_directory, root=False):
+        with patch.dict(os.environ, {"CREDENTIALS_DIRECTORY": str(credentials_directory)}), \
+                patch("observer.__main__.os.geteuid", return_value=0 if root else 1000), \
+                patch("observer.__main__.cycle", side_effect=AssertionError("cycle")), \
+                redirect_stderr(io.StringIO()) as output:
+            self.assertEqual(main(args), 2)
+        self.assertEqual(json.loads(output.getvalue())["error"], "configuration_or_runtime_failure")
+
     def test_default_dry_run_zero_network_or_writes(self):
         with patch("observer.runner.request", side_effect=AssertionError("network")), \
                 patch("observer.__main__.lock", side_effect=AssertionError("writes")), \
@@ -35,6 +57,78 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(main(["--config", str(ROOT / "config.example.json"), "--live"]), 2)
         self.assertEqual(json.loads(output.getvalue())["error"], "configuration_or_runtime_failure")
         self.assertNotIn("example.invalid", output.getvalue())
+
+    def test_live_refuses_root_before_reading_credential_copies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_credential(directory, "config",
+                                         json.dumps(self.activation_config()))
+            with patch("observer.__main__.config.token", side_effect=AssertionError("token")):
+                self.assert_live_refused(["--config", str(path), "--live"],
+                                         credentials_directory=directory, root=True)
+
+    def test_live_requires_matching_credential_config_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            credential_directory = Path(directory) / "credentials"
+            credential_directory.mkdir()
+            config_path = self.write_credential(directory, "other-config",
+                                                json.dumps(self.activation_config()))
+            with patch("observer.__main__.config.token", side_effect=AssertionError("token")):
+                self.assert_live_refused(["--config", str(config_path), "--live"],
+                                         credentials_directory=credential_directory)
+
+    def test_live_rejects_disabled_or_unverified_provider_contract_before_tokens(self):
+        for enabled, contract_verified in [(False, True), (True, False)]:
+            with self.subTest(enabled=enabled, contract_verified=contract_verified), \
+                    tempfile.TemporaryDirectory() as directory:
+                path = self.write_credential(
+                    directory, "config", json.dumps(self.activation_config(
+                        enabled=enabled, contract_verified=contract_verified)))
+                with patch("observer.__main__.config.token", side_effect=AssertionError("token")):
+                    self.assert_live_refused(["--config", str(path), "--live"],
+                                             credentials_directory=directory)
+
+    def test_live_rejects_insecure_config_credential_copy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_credential(directory, "config", json.dumps(self.activation_config()),
+                                         mode=0o644)
+            with patch("observer.__main__.config.token", side_effect=AssertionError("token")):
+                self.assert_live_refused(["--config", str(path), "--live"],
+                                         credentials_directory=directory)
+
+    def test_live_rejects_malformed_or_group_readable_provider_copy(self):
+        for contents, mode in [("not-a-token!", 0o600), ("safe-test-token", 0o640)]:
+            with self.subTest(mode=oct(mode)), tempfile.TemporaryDirectory() as directory:
+                path = self.write_credential(directory, "config",
+                                             json.dumps(self.activation_config()))
+                self.write_credential(directory, "provider_token", contents, mode=mode)
+                self.assert_live_refused(["--config", str(path), "--live"],
+                                         credentials_directory=directory)
+
+    def test_live_refuses_extreme_persisted_timestamp_before_heartbeat(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            credential_dir = root / "credentials"
+            credential_dir.mkdir()
+            config_path = self.write_credential(credential_dir, "config",
+                                                json.dumps(self.activation_config()))
+            state_dir = root / "state"
+            state_dir.mkdir(mode=0o700)
+            persisted = state.empty()
+            now = time.time()
+            for i in range(3):
+                state.advance(persisted, "wan_edge", False, now + i)
+            persisted["events"][0]["created"] = 10 ** 400
+            state.write(state_dir, persisted)
+            with patch.dict(os.environ, {"CREDENTIALS_DIRECTORY": str(credential_dir)}), \
+                    patch("observer.__main__.os.geteuid", return_value=1000), \
+                    patch("observer.__main__.config.token", return_value="synthetic-token"), \
+                    patch("observer.runner._provider", return_value=True) as provider, \
+                    redirect_stderr(io.StringIO()) as errors, redirect_stdout(io.StringIO()) as output:
+                result = main(["--config", str(config_path), "--state-dir", str(state_dir), "--live"])
+            self.assertEqual(result, 2)
+            self.assertEqual(json.loads(errors.getvalue())["error"], "configuration_or_runtime_failure")
+            self.assertEqual(output.getvalue(), "")
+            provider.assert_not_called()
 
     def test_unknown_configuration_and_invalid_negative_contract(self):
         base = config.load(ROOT / "config.example.json")

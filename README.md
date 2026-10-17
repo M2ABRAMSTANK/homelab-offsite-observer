@@ -42,9 +42,14 @@ generated in a temporary directory and removed afterward.
 
 The default CLI never activates live monitoring. Live execution requires `--live`,
 `enabled: true`, `provider.contract_verified: true`, a non-root runtime account,
-and configuration and tokens supplied through systemd `LoadCredential`. The
-included timer is installed disabled by the documented procedure. No code opens
-a server socket or automatically installs/enrolls anything.
+and protected configuration and token files. The supplied systemd unit uses
+`LoadCredential` to provide those files privately. The CLI verifies the
+`CREDENTIALS_DIRECTORY/config` path and secure credential-file properties; it
+does not authenticate its caller as systemd. Run live operation through the
+reviewed unit: a manual invocation does not receive its sandbox, time limit, or
+resource controls. The included timer is installed disabled by the documented
+procedure. No code opens a server socket or automatically installs/enrolls
+anything.
 
 A provider must independently evaluate missing heartbeats and deliver to verified
 recipients. A generic webhook 2xx response cannot prove handset delivery or a

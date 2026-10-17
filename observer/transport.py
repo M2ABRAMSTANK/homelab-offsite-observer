@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import http.client
 import ipaddress
 import io
+import re
 import socket
 import ssl
 import struct
@@ -87,6 +88,8 @@ class LimitedFile:
         self.fp = fp
         self.header_bytes = 0
         self.last_header_line = None
+        self.line_count = 0
+        self.headers_complete = False
 
     def readline(self, limit=-1):
         value = self.fp.readline(min(8193, limit) if limit > 0 else 8193)
@@ -94,6 +97,23 @@ class LimitedFile:
         self.header_bytes += len(value)
         if len(value) > 8192 or self.header_bytes > 16384:
             raise ValueError("headers too large")
+        if not self.headers_complete:
+            if self.line_count == 0 and not value:
+                # Let http.client classify a zero-byte post-TLS EOF. Any
+                # partial status has already been captured as invalid input.
+                return value
+            if self.line_count == 0:
+                # http.client accepts signed or four-digit status codes; exact
+                # denial evidence requires a well-formed HTTP/1.x status line.
+                valid = re.fullmatch(rb"HTTP/1\.[01] [1-5][0-9]{2}(?: [\x20-\x7e]*)?\r\n", value)
+            else:
+                # email.parser silently discards malformed headers. Refuse them
+                # before an exact 4xx can be mistaken for a proven denial.
+                valid = value == b"\r\n" or re.fullmatch(
+                    rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+:[\x09\x20-\x7e]*\r\n", value)
+            if not valid:
+                raise ValueError("malformed HTTP header")
+            self.line_count += 1
         return value
 
     def read(self, count=-1):
@@ -136,6 +156,28 @@ class HTTPStream:
         return self.file
 
 
+def read_chunked(fp):
+    """Decode a bounded chunk stream with exact separators and termination."""
+    body = bytearray()
+    while True:
+        size_line = fp.readline()
+        # Extensions and trailers are unnecessary for these fixed JSON contracts.
+        # Reject them rather than trusting http.client's permissive decoder.
+        if len(size_line) > 10 or not re.fullmatch(rb"[0-9A-Fa-f]{1,8}\r\n", size_line):
+            raise ValueError("invalid chunk size")
+        size = int(size_line[:-2], 16)
+        if size == 0:
+            if fp.readline() != b"\r\n":
+                raise ValueError("invalid chunk trailer")
+            return bytes(body)
+        if size > MAX_BODY - len(body):
+            raise ValueError("body too large")
+        chunk = fp.read(size)
+        if len(chunk) != size or fp.read(2) != b"\r\n":
+            raise ValueError("incomplete chunk")
+        body.extend(chunk)
+
+
 def request(url, *, timeout=8, headers=None, payload=None, proxy=None, negative=False):
     started = time.monotonic()
     result = Response("network_error")
@@ -171,21 +213,38 @@ def request(url, *, timeout=8, headers=None, payload=None, proxy=None, negative=
         result.status = response.status
         # http.client accepts EOF as the end of headers; denial needs a real
         # blank-line terminator, not a truncated status/header stream.
-        if stream.file.last_header_line not in (b"\r\n", b"\n"):
+        if stream.file.last_header_line != b"\r\n":
             raise ValueError("truncated headers")
+        stream.file.headers_complete = True
         # Duplicate headers are rejected rather than silently overriding freshness controls.
         pairs = response.getheaders()
         if len({k.lower() for k, _ in pairs}) != len(pairs):
             raise ValueError("duplicate headers")
         result.headers = {k.lower(): v for k, v in pairs}
+        if "content-length" in result.headers and "transfer-encoding" in result.headers:
+            raise ValueError("ambiguous response framing")
+        if "transfer-encoding" in result.headers and result.headers["transfer-encoding"].lower() != "chunked":
+            raise ValueError("unsupported response framing")
+        if "transfer-encoding" in result.headers and not response.chunked:
+            raise ValueError("invalid chunked framing")
+        declared_length = result.headers.get("content-length")
+        if declared_length is not None:
+            if len(declared_length) > 20 or not re.fullmatch(r"[0-9]+", declared_length):
+                raise ValueError("invalid content length")
+            if response.length != int(declared_length):
+                raise ValueError("inconsistent content length")
         result.kind = "http"
         if negative:
             return result  # No response body retained for negative exposure probes.
         if result.headers.get("content-encoding", "identity").lower() != "identity":
             raise ValueError("compressed response refused")
-        result.body = response.read(MAX_BODY + 1)
+        if declared_length is not None and int(declared_length) > MAX_BODY:
+            raise ValueError("body too large")
+        result.body = read_chunked(stream.file) if response.chunked else response.read(MAX_BODY + 1)
         if len(result.body) > MAX_BODY:
             raise ValueError("body too large")
+        if response.length is not None and response.length != 0:
+            raise ValueError("incomplete response body")
     except http.client.RemoteDisconnected:
         result.kind = abort_kind("post_tls_eof", "network_error")
     except ssl.SSLEOFError:

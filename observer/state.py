@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import time
 import uuid
 
 from .checks import json_object, utc
@@ -12,6 +13,10 @@ from .checks import json_object, utc
 MAX_EVENTS = 1000
 MAX_BYTES = 16 * 1024 * 1024
 MAX_AGE = 86400
+# A timer normally runs every 30 seconds. Retain a bounded short rollback without
+# allowing a corrupt future timestamp to pin an event indefinitely.
+MAX_FUTURE_SKEW = 300
+MAX_RETRY = 300
 KEYS = ("wan_edge", "edge_exposure", "private_queue", "clock", "provider_path")
 
 
@@ -45,7 +50,8 @@ def advance(state, key, outcome, now, *, delivery_ok=True):
 
 
 def bound(state, now):
-    kept = [e for e in state["events"] if 0 <= now - e["created"] <= MAX_AGE]
+    kept = [e for e in state["events"]
+            if -MAX_FUTURE_SKEW <= now - e["created"] <= MAX_AGE]
     state["dropped"] = min(1_000_000_000, state["dropped"] + len(state["events"]) - len(kept))
     state["events"] = kept
     while len(state["events"]) > MAX_EVENTS or len(encode(state)) > MAX_BYTES:
@@ -55,7 +61,7 @@ def bound(state, now):
 
 def retry(event, now):
     event["attempts"] = min(16, event["attempts"] + 1)
-    event["next"] = now + min(300, 5 * 2 ** (event["attempts"] - 1))
+    event["next"] = now + min(MAX_RETRY, 5 * 2 ** (event["attempts"] - 1))
 
 
 def encode(state):
@@ -84,7 +90,13 @@ def lock(directory):
         os.close(fd)
 
 
-def read(directory):
+def _timestamp(value, now, future=MAX_FUTURE_SKEW):
+    return type(value) in (int, float) and 0 <= value <= now + future
+
+
+def read(directory, *, now=None):
+    if now is None:
+        now = time.time()
     path = Path(directory) / "state.json"
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -98,7 +110,9 @@ def read(directory):
             state = json_object(fp.read(MAX_BYTES + 1))
         # Do not silently reset corrupt state and erase outage evidence.
         if (type(state) is not dict or set(state) != {"schema", "machines", "events", "dropped"}
-                or state["schema"] != 1 or set(state["machines"]) != set(KEYS)
+                or type(state["schema"]) is not int or state["schema"] != 1
+                or type(state["machines"]) is not dict
+                or set(state["machines"]) != set(KEYS)
                 or type(state["events"]) is not list or len(state["events"]) > MAX_EVENTS):
             raise ValueError("state schema invalid")
         for machine in state["machines"].values():
@@ -106,14 +120,15 @@ def read(directory):
                     or type(machine["open"]) is not bool
                     or type(machine["fail"]) is not int or not 0 <= machine["fail"] <= 3
                     or type(machine["pass"]) is not int or not 0 <= machine["pass"] <= 2
-                    or type(machine["notified"]) not in (int, float)):
+                    or not _timestamp(machine["notified"], now)):
                 raise ValueError("state machine invalid")
         for event in state["events"]:
             if (type(event) is not dict or set(event) != {"id", "key", "event", "at", "created", "attempts", "next"}
                     or event["key"] not in KEYS or event["event"] not in {"incident", "recovery"}
                     or not isinstance(event["id"], str) or len(event["id"]) != 32
                     or not isinstance(event["at"], str) or len(event["at"]) > 40
-                    or type(event["created"]) not in (int, float) or type(event["next"]) not in (int, float)
+                    or not _timestamp(event["created"], now)
+                    or not _timestamp(event["next"], now, MAX_FUTURE_SKEW + MAX_RETRY)
                     or type(event["attempts"]) is not int or not 0 <= event["attempts"] <= 16):
                 raise ValueError("state event invalid")
         if type(state["dropped"]) is not int or not 0 <= state["dropped"] <= 1_000_000_000:

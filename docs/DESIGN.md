@@ -16,8 +16,10 @@ to hardcoded values in this public source.
 
 Tailscale is optional and is a separate userspace daemon with a **loopback-only**
 SOCKS5 listener. That is the sole intentional local proxy listener. The observer
-service cannot bind listening sockets (`SocketBindDeny=any`), cannot install the
-daemon and cannot modify its enrollment or tailnet policy.
+source opens no listener. The supplied unit requests IPv4/IPv6 bind denial with
+`SocketBindDeny=any`; its actual enforcement on the guest must be verified, and
+it does not cover AF_UNIX. The service cannot install the daemon or modify its
+enrollment or tailnet policy.
 
 ## Data flow
 
@@ -72,10 +74,16 @@ verified-TLS response is inconclusive. An
 inconclusive transport failure preserves the exposure streak; it does not page
 as a new exposure incident. Negative response bodies are not read.
 
-The workers bound response bodies at 16 KiB + one overflow sentinel byte,
-cumulative headers at 16 KiB, each header line at 8 KiB, each probe lifetime at
-8 seconds, and the negative list at eight endpoints. Duplicate JSON keys,
-duplicate HTTP headers, non-finite JSON values and compressed bodies are refused.
+The workers accept response bodies no larger than 16 KiB with bounded overflow
+detection, cumulative headers at 16 KiB, each header line at 8 KiB, each probe
+lifetime at 8 seconds, and the negative list at eight endpoints. Duplicate JSON keys,
+duplicate HTTP headers, malformed HTTP/1.x status/header syntax, ambiguous or
+unsupported framing, incomplete bodies/trailers, non-finite JSON values and
+compressed bodies are refused. An `http_denial` also requires complete valid
+headers before its configured status can count; its response body is not read.
+Health JSON accepts only bounded decimal content lengths and strict chunk framing:
+1–8 ASCII hexadecimal size digits, CRLF delimiters, final zero chunk, with no
+chunk extensions or trailer fields.
 All child processes are killed/reaped at their group deadline, including blocked
 DNS and slow-drip responses. Only the observer parent touches persistent state.
 
@@ -90,32 +98,41 @@ both its passing probe streak and an acknowledged provider heartbeat in that
 cycle. Provider failure cannot erase a home incident.
 
 The observer submits an execution heartbeat first, even when home checks fail.
-The external provider must evaluate **its receive time**, opening an
-observer/provider-path-loss incident after three missed 30-second heartbeats.
-Heartbeats are never spooled or replayed: old execution must not masquerade as
-current liveness. The local `provider_path` incident can be queued, but cannot
-alert through a failed provider. External `observer_host` evaluation lives
-outside this process and is a mandatory deployment gate.
+Its accepted receipt shows only that this pre-probe stage was reached; it does
+not establish probe, state, or event-delivery completion. The external provider
+must evaluate **its receive time**, opening an observer/provider-path-loss
+incident after three missed 30-second heartbeats. Heartbeats are never spooled
+or replayed: old execution must not masquerade as current liveness. The local
+`provider_path` incident can be queued, but cannot alert through a failed
+provider. It reflects `heartbeat_url` only; an isolated `events_url` failure can
+leave it healthy while retained events retry. External `observer_host` evaluation
+lives outside this process and is a mandatory deployment gate.
 
 Event delivery is at least once while retained: an acknowledged event can replay
 after a crash before the next atomic write, so the adapter must deduplicate the
 stable event ID for at least 24 hours. Retries use 5, 10, 20…300-second delays;
 30-second timer cadence means the first actual retry may be later than 5 seconds.
-The oldest pending event blocks later events to preserve incident/recovery order.
-Open incidents receive a fresh reminder after 24 hours. Events expire after 24
-hours and the spool is capped at 1,000 events / 16 MiB; oldest events are dropped
-to remain bounded and the evidence contains a capped drop counter. This is
-bounded best-effort alerting, not a lossless message queue. The external dead-man
-is the control for a prolonged provider or observer failure.
+The oldest retained pending event blocks later retained events to preserve their
+queue order. Open incidents receive a fresh reminder after 24 hours. Events expire
+after 24 hours and the spool is capped at 1,000 events / 16 MiB; oldest events are
+dropped to remain bounded and the evidence contains a capped drop counter. An
+undelivered incident can therefore expire before a later recovery: delivery and
+incident/recovery order are not global guarantees after expiry or dropping. This
+is bounded best-effort alerting, not a lossless message queue. The external
+dead-man is the control for a prolonged provider or observer failure.
 
 ## Runtime permissions and durability
 
 The code and systemd units are root-owned and read-only to `offsite-observer`.
 Production config and token source files are root-owned 0600 under a root-only
-directory. `LoadCredential` provides private, service-readable copies; secrets
-are not placed in argv, environment values, logs, unit names or config fields.
-Only the credential-directory **path** is in the environment. Live runtime
-rejects root and checks private copy ownership/mode and fixed token names.
+directory. The supplied systemd unit's `LoadCredential` directives provide
+private, service-readable copies; secrets are not placed in argv, environment
+values, logs, unit names or config fields. Only the credential-directory **path**
+is in the environment. Live runtime rejects root and checks that its config path
+matches `CREDENTIALS_DIRECTORY/config` plus the private copies' file safety and
+fixed token names. Those checks do not authenticate systemd as the credential
+issuer, so manual live execution is outside the unit's credential, sandbox,
+deadline and resource-control boundary.
 
 State is **service-owned 0600** under a service-owned 0700 local directory. This
 is a deliberate least-privilege choice: requiring a root-owned writable state
@@ -148,9 +165,14 @@ checks fail closed when the clock is untrusted, and a separate clock incident
 opens after three failures. An LXC shares the host kernel clock; the host must
 be synchronized and the guest must demonstrably report trust. Do not grant
 clock-setting capability to solve an untrusted result. NTP trust does not
-cryptographically prove UTC or defend against a compromised host. Wall-clock
-jumps can expire local spool entries; the external provider's independent
-receive-time dead-man remains mandatory.
+cryptographically prove UTC or defend against a compromised host. State loading
+refuses `created`/`notified` values more than 300 seconds ahead of the cycle
+clock, or retry `next` more than 600 seconds ahead to allow a 300-second retry
+after the bounded rollback, before it sends a heartbeat.
+A backward step beyond that tolerance can therefore stop the observer until the
+clock is reconciled. After a successful state load, spool bounding retains events
+created up to 300 seconds in the future and drops older/extreme entries. The
+external provider's independent receive-time dead-man remains mandatory.
 
 ## Primary references used
 

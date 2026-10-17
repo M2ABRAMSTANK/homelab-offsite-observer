@@ -8,8 +8,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from observer.transport import endpoint, request, socks_connect, MAX_BODY
-from observer.checks import negative
+from observer.transport import endpoint, request, socks_connect
+from observer.checks import negative, validate
 
 
 class FakeSocks:
@@ -99,9 +99,62 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(response.status, 302)
         response = self.serve(b"HTTP/1.1 200 OK\r\nContent-Length: 20000\r\n\r\n" + b"a" * 20000)
         self.assertEqual(response.kind, "invalid_response")
-        self.assertGreater(len(response.body), MAX_BODY)
         response = self.serve(b"HTTP/1.1 200 OK\r\nX-Big: " + b"a" * 17000 + b"\r\n\r\n")
         self.assertEqual(response.kind, "invalid_response")
+
+    def test_incomplete_health_body_cannot_pass(self):
+        body = b'{"status":"ok"}'
+        response = self.serve(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n" + body,
+                              tls12=True, clean_close=True)
+        self.assertEqual(response.kind, "invalid_response")
+        self.assertFalse(validate(response, "readiness", expected={"status": "ok"}))
+
+    def test_malformed_denial_header_is_inconclusive(self):
+        for wire in [b"HTTP/1.1 403 Forbidden\r\nBad Header\r\n\r\n",
+                     b"HTTP/1.1 +403\r\n\r\n", b"HTTP/1.1 0403\r\n\r\n"]:
+            with self.subTest(wire=wire):
+                response = self.serve(wire, negative=True, tls12=True, clean_close=True)
+                self.assertEqual(response.kind, "invalid_response")
+                self.assertIsNone(negative(response, {"expected": "http_denial", "statuses": [403]}))
+
+    def test_incomplete_chunked_trailer_cannot_pass(self):
+        body = b'{"status":"ok"}'
+        prefix = (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                  + f"{len(body):x}\r\n".encode("ascii") + body + b"\r\n0\r\n")
+        response = self.serve(prefix + b"\r\n", tls12=True, clean_close=True)
+        self.assertTrue(validate(response, "readiness", expected={"status": "ok"}))
+        response = self.serve(prefix, tls12=True, clean_close=True)
+        self.assertEqual(response.kind, "invalid_response")
+        self.assertFalse(validate(response, "readiness", expected={"status": "ok"}))
+
+    def test_ambiguous_or_invalid_framing_is_inconclusive(self):
+        for framing in [b"Content-Length: 15\r\nTransfer-Encoding: chunked\r\n",
+                        b"Content-Length: abc\r\n", b"Transfer-Encoding: gzip\r\n"]:
+            with self.subTest(framing=framing):
+                response = self.serve(b"HTTP/1.1 403 Forbidden\r\n" + framing + b"\r\n",
+                                      negative=True, tls12=True, clean_close=True)
+                self.assertEqual(response.kind, "invalid_response")
+                self.assertIsNone(negative(response, {"expected": "http_denial", "statuses": [403]}))
+
+    def test_unparseable_content_length_cannot_pass_health(self):
+        response = self.serve(b"HTTP/1.1 200 OK\r\nContent-Length: " + b"9" * 4301
+                              + b"\r\n\r\n" + b'{"status":"ok"}', tls12=True, clean_close=True)
+        self.assertEqual(response.kind, "invalid_response")
+        self.assertFalse(validate(response, "readiness", expected={"status": "ok"}))
+
+    def test_noncanonical_chunk_framing_cannot_pass_health(self):
+        body = b'{"status":"ok"}'
+        prefix = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        for framed in [b"f\r\n" + body + b"XX0\r\n\r\n",
+                       b"+f\r\n" + body + b"\r\n0\r\n\r\n",
+                       b"0xf\r\n" + body + b"\r\n0\r\n\r\n",
+                       b"0_f\r\n" + body + b"\r\n0\r\n\r\n",
+                       b"f;\x00\r\n" + body + b"\r\n0\r\n\r\n",
+                       b"f\r\n" + body + b"\r\n0\r\ninvalid trailer\r\n\r\n"]:
+            with self.subTest(framed=framed):
+                response = self.serve(prefix + framed, tls12=True, clean_close=True)
+                self.assertEqual(response.kind, "invalid_response")
+                self.assertFalse(validate(response, "readiness", expected={"status": "ok"}))
 
     def test_socks_domain_dns_and_policy_refusal(self):
         fake = FakeSocks()
