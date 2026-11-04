@@ -1,3 +1,31 @@
+# Current deployment and provider implementation
+
+The supported installation is now native Debian 12/13 in an unprivileged Proxmox
+LXC, using `deploy/install.yml` and separate `deploy/activate.yml`. It installs
+disabled, checks existing path/account safety and preserves configuration/state.
+Source installation does not provision a host or activate monitoring.
+
+The selected native provider is direct Telegram with a dedicated bot and an
+independent Healthchecks.io dead-man. This supersedes the earlier no-Telegram
+provider choice for this component; it does not reuse the home queue or bot.
+See [Deployment](DEPLOYMENT.md) and [native contracts](CONFIGURATION.md).
+
+Native cycles reserve time for Telegram and Healthchecks. Event state is durable
+before sending; a failed/ambiguous send retains the event for ordered retries.
+There is no Telegram API deduplication. Local detected incident state can recover
+before delivery; failed recovery notification stays queued and triggers the
+independent dead-man failure signal. Healthchecks loss is persisted and can be
+reported through Telegram. No state/receipt field proves handset delivery.
+
+The optional `canary` package is a separate loopback service on the home edge;
+it never runs in the observer role. Existing TLS reverse proxying is configured
+by home IaC. It provides only a fresh nonce/timestamp, while readiness still
+checks the actual application. Private queue integration remains optional and
+requires a real compatible endpoint and narrow Tailscale access.
+
+The original client/state/transport design below remains applicable except that
+its generic adapter details apply only to the legacy provider configuration.
+
 # Design and hosting boundary
 
 ## Intended placement
@@ -5,7 +33,7 @@
 Use an independently hosted **unprivileged Debian LXC**, initially sized at 1 vCPU,
 512 MiB RAM and 4–8 GiB local storage. This is a capacity estimate to verify, not a
 benchmark. The external host and its owner are deployment inputs. There is no
-Terraform state, Proxmox API credential, SSH automation, provider purchase, or
+Terraform state, Proxmox API credential, provider purchase, or
 live guest provisioning in this repository.
 
 The observer needs no Docker, nested containers, host filesystem mount, TUN
@@ -31,9 +59,10 @@ flowchart LR
     probe -->|eligible HTTPS negative probes| deny[public surfaces expected denied]
     probe -->|loopback SOCKS5 / remote DNS| ts[userspace Tailscale]
     ts -->|exact host and TCP port grant / HTTPS GET + read-only token| private[private heartbeat]
-    probe -->|HTTPS POST / execution heartbeat and incident events| provider[independent provider adapter]
-    provider --> deadman[external missing-heartbeat evaluator]
-    provider --> recipient[verified email and independent fallback]
+    probe -->|HTTPS POST / incident and recovery| telegram[dedicated Telegram bot]
+    telegram --> handset[verified recipient]
+    probe -->|HTTPS POST / completion or failure| deadman[Healthchecks external dead-man]
+    deadman --> fallback[independent email or push]
     probe --> state[local atomic bounded state]
     probe --> journal[bounded evidence journal]
 ```
@@ -93,11 +122,16 @@ Each machine opens after three consecutive failures and recovers after two
 passes. WAN, exposure and private machines are independent. Clock and provider
 path have their own local machines. Inconclusive exposure cycles retain existing
 streaks and incidents. A WAN outage suppresses negative evaluation for that cycle.
-An exact eligible denial resets its exposure failure streak. Home recovery needs
-both its passing probe streak and an acknowledged provider heartbeat in that
-cycle. Provider failure cannot erase a home incident.
+An exact eligible denial resets its exposure failure streak. In native mode a
+nonempty prior spool holds local home recovery; otherwise recovery is detected
+and its event durably queued. A subsequent send failure leaves that recovery in
+the spool and fails Healthchecks, so local health is not proof of notification
+delivery. Legacy mode requires an acknowledged pre-probe provider heartbeat to
+allow local recovery.
 
-The observer submits an execution heartbeat first, even when home checks fail.
+### Legacy webhook liveness
+
+The legacy observer submits an execution heartbeat first, even when home checks fail.
 Its accepted receipt shows only that this pre-probe stage was reached; it does
 not establish probe, state, or event-delivery completion. The external provider
 must evaluate **its receive time**, opening an observer/provider-path-loss
@@ -108,9 +142,9 @@ provider. It reflects `heartbeat_url` only; an isolated `events_url` failure can
 leave it healthy while retained events retry. External `observer_host` evaluation
 lives outside this process and is a mandatory deployment gate.
 
-Event delivery is at least once while retained: an acknowledged event can replay
-after a crash before the next atomic write, so the adapter must deduplicate the
-stable event ID for at least 24 hours. Retries use 5, 10, 20…300-second delays;
+An acknowledged event can replay after a crash before the next atomic write.
+The legacy adapter must deduplicate the stable event ID for at least 24 hours;
+native Telegram may deliver duplicate messages, carrying that same event ID. Retries use 5, 10, 20…300-second delays;
 30-second timer cadence means the first actual retry may be later than 5 seconds.
 The oldest retained pending event blocks later retained events to preserve their
 queue order. Open incidents receive a fresh reminder after 24 hours. Events expire

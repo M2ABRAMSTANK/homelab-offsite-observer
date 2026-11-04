@@ -1,0 +1,10 @@
+# Insert INSIDE an existing HTTPS vhost, before its catch-all routing.
+# Keep existing TLS, access controls and other routes. This exposes only the canary.
+handle /v1/observer/canary {
+    reverse_proxy 127.0.0.1:8789 {
+        transport http {
+            dial_timeout 2s
+            response_header_timeout 3s
+        }
+    }
+}

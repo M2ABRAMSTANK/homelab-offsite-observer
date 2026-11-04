@@ -19,8 +19,8 @@ Reproduce `make test` and `make demo`. The suite exercises:
   content-length/chunked-trailer refusal, oversized length refusal, strict chunk
   size/delimiter/final-chunk handling, extension/trailer refusal, redirects,
   oversized headers/body, SOCKS5 domain framing and policy-refusal framing.
-- Three failures/two passes, independent incident machines, provider-gated
-  recovery, inconclusive exposure streak retention, outage negative suppression.
+- Three failures/two passes, independent incident machines, legacy provider-gated
+  recovery and native durable recovery delivery, inconclusive exposure streak retention, outage negative suppression.
 - Oversized private heartbeat ages are unhealthy without aborting a cycle;
   three repeated malformed responses still persist incident streaks, run eligible
   negative probes and deliver queued events, recoveries and new incidents.
@@ -52,9 +52,9 @@ source evidence; it does not emulate the hosting guest or public-network vantage
 | Negative canaries | Valid real TLS then exact measured denial/EOF/reset; pre-TLS and outage remain inconclusive | Local fixtures only |
 | Private path | Exact hostname/port, minimal token representation, OS trust, loopback userspace daemon, approved observer tag/grant | Disabled by example |
 | Denied tailnet paths | Through proxy, forbidden host and port attempts are denied; permitted target succeeds; no routes/SSH/exit-node grant | Not run |
-| Notification | Compatible adapter acknowledges/deduplicates/rate-limits; selected recipients receive incident and recovery on email plus independent fallback. Prove an isolated `events_url` failure is detected externally while `heartbeat_url` continues to acknowledge. | Generic contract only |
-| External dead-man | Stop observer; three missed nominal heartbeats alert externally. Separately fail adapter/provider path and prove independent fallback. Confirm a received heartbeat proves only pre-probe reachability, not cycle completion. Recovery verified | Not implemented locally or run |
-| Provider failure | Does not clear home incident; bounded spool/backoff, expiry/drop behavior, provider deduplication, retained-event order, and isolated event-path failure detection verified end-to-end | Local tests only |
+| Notification | Native Telegram exact-recipient acknowledgment and actual incident/recovery receipt; Healthchecks independent notification. Prove Telegram failure while Healthchecks remains reachable. Legacy adapters additionally need their documented deduplication contract. | Native Telegram + independent Healthchecks implemented; real delivery unverified |
+| External dead-man | Stop observer; three missed nominal heartbeats alert externally. Separately fail adapter/provider path and prove independent fallback. Native pings follow persisted probe/event work; legacy pings prove only pre-probe reachability. Recovery verified | External Healthchecks connector implemented; stopped-guest timing unverified |
+| Provider failure | Observed health and delivery backlog remain distinct; bounded spool/backoff, expiry/drop behavior, retained-event order, ambiguous-send duplicates and both provider-path failures verified end-to-end | Local tests only |
 | Backup/restore | Encrypted daily backups with approved retention; isolated restore networking off, protected data recovered, dry-run contacts nothing | Operator-managed; not run |
 | Live authorization | Explicit host/network/provider actions approved after review; config enabled and contract_verified set by operator | No deployment authorization here |
 
@@ -63,8 +63,16 @@ commercial provider name. Real recipient contact, provider purchase and policy
 changes are separate actions. Do not send review invitations or messages from
 this code repository without explicit operator authorization.
 
-Known v1 limits: no selected provider connector, no cryptographic proof against
+Known limits: no cryptographic proof against
 a compromised host/endpoint, no guaranteed message retention/delivery, no
-platform provisioning or automated restore, no third-party remediation, and no
+Proxmox provisioning or automated restore, no third-party remediation, and no
 production-accepted monitoring claim. Private checks can be disabled, so the
 activation report must make that coverage gap explicit.
+
+
+Current source verification is recorded in [VALIDATION.md](VALIDATION.md).
+Installation and separate activation are implemented, with strict first-cycle
+outcome checks. Native Telegram has no provider event deduplication guarantee;
+check pending/drop counters as well as local incident booleans. The provider test
+unit can send identifiable synthetic messages without enabling monitoring or
+changing its spool. Never mark recipient or runtime gates complete from fixtures.

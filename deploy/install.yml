@@ -1,0 +1,253 @@
+---
+- name: Install the observer disabled in one dedicated unprivileged Debian LXC
+  hosts: observer
+  become: true
+  gather_facts: false
+  serial: 1
+  vars:
+    observer_stop_for_update: false
+    observer_config_file: ""
+    observer_provider_token_file: ""
+    observer_private_token_file: ""
+    observer_heartbeat_token_file: ""
+    observer_telegram_chat_file: ""
+    observer_source: "{{ playbook_dir }}/.."
+  tasks:
+    - name: Require one explicit target and typed update consent
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+          - observer_stop_for_update is boolean
+
+    - name: Refuse unsupported guests and unsafe existing paths before changes
+      ansible.builtin.script:
+        cmd: "{{ observer_source }}/tools/guest_check.py"
+        executable: /usr/bin/python3
+      changed_when: false
+      check_mode: false
+
+    - name: Inspect existing units
+      ansible.builtin.service_facts:
+
+    - name: Refuse an active upgrade without explicit stop consent
+      ansible.builtin.command:
+        argv: [systemctl, list-units, '--state=active,activating,deactivating,reloading', --no-legend, --plain, 'offsite-observer*.service', offsite-observer.timer]
+      register: observer_active
+      changed_when: false
+      failed_when: observer_active.rc != 0
+      check_mode: false
+
+    - name: Require update authorization when monitoring is active
+      ansible.builtin.assert:
+        that:
+          - observer_stop_for_update or observer_active.stdout | trim | length == 0
+        fail_msg: "Monitoring is active. Arrange provider maintenance and backup, then set observer_stop_for_update=true."
+
+    - name: Check installed timer file
+      ansible.builtin.stat:
+        path: /etc/systemd/system/offsite-observer.timer
+      register: observer_timer
+
+    - name: Keep existing timer disabled
+      ansible.builtin.systemd_service:
+        name: offsite-observer.timer
+        state: stopped
+        enabled: false
+      when: observer_timer.stat.exists
+
+    - name: Stop existing worker before replacing any source
+      ansible.builtin.systemd_service:
+        name: offsite-observer.service
+        state: stopped
+      when: "'offsite-observer.service' in ansible_facts.services"
+
+    - name: Stop any active acceptance preflight or provider-test workers
+      ansible.builtin.command:
+        argv: [systemctl, stop, 'offsite-observer*.service']
+      when: observer_active.stdout | trim | length > 0
+      changed_when: true
+
+    - name: Install distribution runtime prerequisites
+      ansible.builtin.apt:
+        name: [python3, ca-certificates, dbus, systemd]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Create dedicated runtime group
+      ansible.builtin.group:
+        name: offsite-observer
+        system: true
+
+    - name: Create dedicated runtime account
+      ansible.builtin.user:
+        name: offsite-observer
+        group: offsite-observer
+        system: true
+        create_home: false
+        home: /nonexistent
+        shell: /usr/sbin/nologin
+        password_lock: true
+
+    - name: Create root-owned code directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - /opt/offsite-observer
+        - /opt/offsite-observer/observer
+        - /opt/offsite-observer/tools
+        - /etc/systemd/system/offsite-observer.service.d
+
+    - name: Create protected configuration directory
+      ansible.builtin.file:
+        path: /etc/offsite-observer
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Install reviewed Python modules
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "/opt/offsite-observer/observer/{{ item | basename }}"
+        owner: root
+        group: root
+        mode: '0644'
+      loop: "{{ lookup('ansible.builtin.fileglob', observer_source + '/observer/*.py', wantlist=True) }}"
+
+    - name: Install preflight helper
+      ansible.builtin.copy:
+        src: "{{ observer_source }}/tools/{{ item }}"
+        dest: "/opt/offsite-observer/tools/{{ item }}"
+        owner: root
+        group: root
+        mode: '0644'
+
+      loop: [guest_check.py, deployment_check.py]
+
+    - name: Seed inert configuration without overwriting an existing configuration
+      ansible.builtin.copy:
+        src: "{{ observer_source }}/config.telegram.example.json"
+        dest: /etc/offsite-observer/config.json
+        owner: root
+        group: root
+        mode: '0600'
+        force: false
+      no_log: true
+      diff: false
+
+    - name: Install operator configuration when supplied
+      ansible.builtin.copy:
+        src: "{{ observer_config_file }}"
+        dest: /etc/offsite-observer/config.json
+        owner: root
+        group: root
+        mode: '0600'
+      when: observer_config_file | length > 0
+      no_log: true
+      diff: false
+
+    - name: Install separately supplied credentials
+      ansible.builtin.copy:
+        src: "{{ item.source }}"
+        dest: "/etc/offsite-observer/{{ item.name }}.token"
+        owner: root
+        group: root
+        mode: '0600'
+      loop:
+        - {name: provider, source: "{{ observer_provider_token_file }}"}
+        - {name: private, source: "{{ observer_private_token_file }}"}
+        - {name: heartbeat, source: "{{ observer_heartbeat_token_file }}"}
+        - {name: telegram_chat, source: "{{ observer_telegram_chat_file }}"}
+      when: item.source | length > 0
+      no_log: true
+      diff: false
+
+    - name: Validate installed configuration without network or state writes
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, -B, -m, observer, --config, /etc/offsite-observer/config.json]
+        chdir: /opt/offsite-observer
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Read coverage flags without disclosing configuration
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, -B, -c, "import json; c=json.load(open('/etc/offsite-observer/config.json')); print(json.dumps({'private': c['private']['enabled'], 'native': c['provider'].get('kind') == 'telegram_healthchecks'}))"]
+      register: observer_flags
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Create preflight and provider-test drop-in directories
+      ansible.builtin.file:
+        path: "/etc/systemd/system/{{ item }}.service.d"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+      loop: [offsite-observer-preflight, offsite-observer-acceptance, 'offsite-observer-provider-test@']
+
+    - name: Install credential mapping for enabled coverage
+      ansible.builtin.template:
+        src: credentials.conf.j2
+        dest: "/etc/systemd/system/{{ item }}.service.d/credentials.conf"
+        owner: root
+        group: root
+        mode: '0644'
+      loop: [offsite-observer, offsite-observer-preflight, offsite-observer-acceptance, 'offsite-observer-provider-test@']
+      when: not ansible_check_mode
+
+    - name: Install systemd units
+      ansible.builtin.copy:
+        src: "{{ observer_source }}/systemd/{{ item }}"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: '0644'
+      loop: [offsite-observer.service, offsite-observer.timer]
+
+    - name: Install identical sandbox for network-free credential and clock preflight
+      ansible.builtin.copy:
+        content: "{{ lookup('ansible.builtin.file', observer_source + '/systemd/offsite-observer.service') | replace('--live', '--preflight') }}\n"
+        dest: /etc/systemd/system/offsite-observer-preflight.service
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Install first-cycle acceptance unit with strict outcome exit status
+      ansible.builtin.copy:
+        content: "{{ lookup('ansible.builtin.file', observer_source + '/systemd/offsite-observer.service') | replace('--live', '--live --require-healthy') }}\n"
+        dest: /etc/systemd/system/offsite-observer-acceptance.service
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Install explicitly invoked provider acceptance test unit
+      ansible.builtin.copy:
+        content: "{{ lookup('ansible.builtin.file', observer_source + '/systemd/offsite-observer.service') | regex_replace('ExecStart=.*', 'ExecStart=/usr/bin/python3 -B -m observer.provider_test %i --send') }}\n"
+        dest: /etc/systemd/system/offsite-observer-provider-test@.service
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Verify unit syntax on the target systemd version
+      ansible.builtin.command:
+        argv: [systemd-analyze, verify, /etc/systemd/system/offsite-observer.service, /etc/systemd/system/offsite-observer.timer]
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Reload units and leave monitoring disabled
+      ansible.builtin.systemd_service:
+        name: offsite-observer.timer
+        daemon_reload: true
+        enabled: false
+        state: stopped
+      when: not ansible_check_mode
+
+    - name: Report installed state
+      ansible.builtin.debug:
+        msg: "Installed with timer disabled. Configure private inputs and complete docs/DEPLOYMENT.md before activate.yml."

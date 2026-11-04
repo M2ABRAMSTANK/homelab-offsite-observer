@@ -1,5 +1,9 @@
 # Configuration and endpoint contracts
 
+Use `config.telegram.example.json` for the native Telegram + Healthchecks deployment.
+`config.example.json` retains the original generic adapter configuration. Both use
+schema 1; unknown keys remain errors.
+
 [`config.example.json`](../config.example.json) is the complete schema-1 shape.
 [`observer/config.py`](../observer/config.py) is its executable validator. Unknown
 keys at every configuration level are errors; there are no environment-based
@@ -95,12 +99,49 @@ fails an eligible check. TLS/DNS/pre-TLS connection failure and timeout are
 inconclusive. Fixture results do not prove the real edge's expected behavior;
 its exact behavior must be independently measured and configured.
 
-## Generic notification adapter contract
+## Native Telegram + Healthchecks provider
 
-This repository implements a **custom webhook contract**, not a selected
-commercial provider's connector. It cannot be pointed blindly at an arbitrary
+Set `provider` to exactly `{"kind":"telegram_healthchecks","contract_verified":false}`.
+There are no configurable provider URLs: the implementation fixes Telegram to
+`https://api.telegram.org/bot<TOKEN>/sendMessage` and Healthchecks to
+`https://hc-ping.com/<UUID>`, appending `/fail` for pending/dropped notification
+work. Tokens/UUID and numeric chat ID are separate protected credentials; neither
+API credential is sent to the other service. See [Deployment](DEPLOYMENT.md) for
+account setup and [Operations](OPERATIONS.md) for delivery/recovery semantics.
+
+Telegram POST JSON includes only numeric `chat_id`, fixed reduced text and
+content protection/preview flags. Accept only verified TLS, HTTP 200, `ok: true`,
+a positive integer message ID and the exact numeric returned chat ID. Telegram
+has no idempotency key: retry order is retained locally, but duplicate messages
+are possible after a lost response. A stable event ID is included in the text.
+The local incident state and delivery backlog are separate evidence.
+
+Native Healthchecks pings are empty-body HTTPS POSTs after state persistence,
+never replayed or queued. Accept only verified TLS, HTTP 200 and body `OK`.
+Pending events/backoff or a nonzero drop counter produce `/fail`; home probe
+failures with successfully delivered events still produce a normal execution
+heartbeat. Healthchecks failure itself is persisted as `provider_path` and can
+notify through Telegram on the next cycle after its three-failure threshold.
+Configure independent notification delivery; a local process cannot report its
+own death. Default examples are disabled and do not contact either provider.
+
+Native credential names are `provider_token` (dedicated bot token),
+`telegram_chat` (signed numeric chat ID) and `heartbeat_token` (check UUID).
+They are loaded from `provider.token`, `telegram_chat.token` and `heartbeat.token`
+by systemd; optional `private_token` is unchanged. Source files are root-owned
+0600 under `/etc/offsite-observer`; runtime copies belong to the service user.
+Native secrets use specific grammars, not the generic bearer-token grammar below.
+
+Contracts: [Telegram sendMessage](https://core.telegram.org/bots/api#sendmessage),
+[Healthchecks Pinging API](https://healthchecks.io/docs/http_api/),
+[Healthchecks schedule](https://healthchecks.io/docs/configuring_checks/).
+
+## Legacy generic notification adapter contract
+
+The legacy configuration implements a **custom webhook contract**. The native
+configuration above needs no such adapter. It cannot be pointed blindly at an arbitrary
 provider. Host it or select a compatible adapter independently, verify semantics,
-and then set `contract_verified: true`. No Telegram adapter is implemented.
+and then set `contract_verified: true`. This legacy mode does not invoke the native Telegram connector.
 
 Both requests are HTTPS POST JSON with `Authorization: Bearer <provider_token>`
 and `Idempotency-Key`. Response must complete verified TLS and HTTP 200, 202 or
@@ -145,7 +186,7 @@ a failed path. Events can expire or be dropped locally before delivery, so no
 global incident/recovery ordering or delivery guarantee exists. No recipient or
 credential is invented in this repository.
 
-## Secrets and endpoint allowlist
+## Legacy secrets and endpoint allowlist
 
 Production token sources are root-owned 0600 files in `/etc/offsite-observer`.
 Private credential copies are named `provider_token` and optional `private_token`.

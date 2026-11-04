@@ -63,9 +63,14 @@ def load(path, *, secure=False):
         raise ValueError("invalid loopback SOCKS port")
     if not integer(cfg["private"]["max_pending_seconds"], 3600):
         raise ValueError("invalid private queue age threshold")
-    exact(cfg["provider"], {"heartbeat_url", "events_url", "contract_verified"})
-    endpoint(cfg["provider"]["heartbeat_url"])
-    endpoint(cfg["provider"]["events_url"])
+    if type(cfg["provider"]) is not dict:
+        raise ValueError("invalid provider configuration")
+    if cfg["provider"].get("kind") == "telegram_healthchecks":
+        exact(cfg["provider"], {"kind", "contract_verified"})
+    else:
+        exact(cfg["provider"], {"heartbeat_url", "events_url", "contract_verified"})
+        endpoint(cfg["provider"]["heartbeat_url"])
+        endpoint(cfg["provider"]["events_url"])
     if type(cfg["provider"]["contract_verified"]) is not bool:
         raise ValueError("provider.contract_verified must be boolean")
     return cfg
@@ -88,7 +93,7 @@ def secure_file(path, *, root=False):
 
 def token(directory, name):
     # systemd LoadCredential gives the service a private, read-only credential copy.
-    raw = secure_file(Path(directory) / name).decode("ascii").strip()
+    raw = secure_file(directory / name if hasattr(directory, "__truediv__") else Path(directory) / name).decode("ascii").strip()
     if not re.fullmatch(r"[A-Za-z0-9._~+/-]{8,4096}={0,2}", raw):
         raise ValueError("invalid bearer credential")
     return raw

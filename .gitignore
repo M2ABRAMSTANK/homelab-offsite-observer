@@ -7,3 +7,7 @@ state/
 *.pem
 *.key
 *.crt
+# Private deployment inputs must remain outside the checkout.
+deploy/inputs.yml
+deploy/inventory.yml
+*.retry

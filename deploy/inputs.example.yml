@@ -1,0 +1,8 @@
+---
+# Copy OUTSIDE the checkout. Paths refer to files on the Ansible controller.
+observer_config_file: /root/offsite-private/config.json
+observer_provider_token_file: /root/offsite-private/provider.token
+observer_telegram_chat_file: /root/offsite-private/telegram_chat.token
+observer_heartbeat_token_file: /root/offsite-private/heartbeat.token
+# Optional, only with a real authenticated heartbeat and restricted Tailscale grant:
+observer_private_token_file: ""

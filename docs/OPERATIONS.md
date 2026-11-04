@@ -1,180 +1,90 @@
-# Manual installation and operation
+# Operations
 
-These are reviewable procedures for a **future, separately authorized guest**.
-Nothing here has been executed against a host. The repository does not provision
-an LXC, change the hosting Proxmox node, install on import, or auto-enable a timer.
-Use the hosting operator's IaC for an unprivileged Debian guest, encrypted backup
-and network policy; never hand-patch an existing container to widen privileges.
+Use [DEPLOYMENT.md](DEPLOYMENT.md) for install, configuration, provider tests and
+activation. The package runs natively under systemd in an unprivileged Debian
+12/13 LXC; the Docker image under `tests/` is only a local validation fixture.
 
-## Prerequisites
-
-- Independently hosted unprivileged Debian LXC, local filesystem, no host mounts,
-  no nesting/Docker privileges, no TUN/raw socket capability, no inbound service.
-- Python 3.11+, OS `ca-certificates`, systemd 252+ and a synchronized host clock.
-  The guest must report `NTPSynchronized=yes`; prove this before enabling.
-- Outbound resolver independent of the monitored home edge, exact HTTPS target
-  contracts, a deployed freshness canary and root-managed private trust if needed.
-- Independent compatible webhook adapter, recipient/fallback selection, externally
-  tested dead-man, and dedicated minimal provider credential.
-- Optional private endpoint/read-only token and approved destination/port grant.
-- Hosting console access. Inspect template SSH/other listeners and reconcile them
-  through guest IaC; the observer requires no inbound guest listener.
-
-Inspect the code and test it locally first (`make test`, `make demo`). Review the
-real guest's systemd/LXC sandbox support; namespace/cgroup restrictions vary.
-Do not weaken a failed sandbox or make the LXC privileged to make it start.
-
-## Install disabled
-
-Run as the future guest administrator from the reviewed checkout, after the
-hosting operator has approved this host action. Provision packages through that
-host's IaC or distribution package manager; no curl-piped installer is supplied.
+## Observe and stop
 
 ```sh
-sudo useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin offsite-observer
-sudo install -d -o root -g root -m 0755 /opt/offsite-observer/observer
-sudo install -o root -g root -m 0644 observer/*.py /opt/offsite-observer/observer/
-sudo install -o root -g root -m 0644 config.example.json /opt/offsite-observer/config.example.json
-sudo install -d -o root -g root -m 0700 /etc/offsite-observer
-sudo install -o root -g root -m 0644 systemd/offsite-observer.service systemd/offsite-observer.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-python3 -B -m observer --config config.example.json
+systemctl list-timers offsite-observer.timer
+journalctl -u offsite-observer.service --since '-10 minutes' --no-pager
+systemctl disable --now offsite-observer.timer
+systemctl stop offsite-observer.service
 ```
 
-Do not run `useradd` if the account already exists; first verify its UID/group,
-shell, home and memberships. Source must remain root-owned and not service-writable.
-Install does not create tokens, activate monitoring or enable the timer. Review
-the optional guest-wide journal policy before installing
-`systemd/journald-retention.conf` under `/etc/systemd/journald.conf.d/`; reconcile
-with existing needs and reload/restart journald only under host authorization.
-The combined size/retention settings are upper bounds, not guaranteed retention.
+Evidence contains fixed probe classes, timestamps, booleans and aggregate counters,
+never URLs, tokens or remote response bodies. Inspect `outcomes`, `incidents`,
+`spool_events`, `spool_dropped` and `provider_heartbeat` together. Ordinary cycles
+exit 2 on clock/heartbeat failure; a home outage is reported as monitoring data,
+not necessarily a failed systemd unit. Acceptance uses stricter exit criteria.
 
-## Configure and optional Tailscale
+For native Telegram, `incidents` describes local detected state, **not confirmed
+notification receipt**. A recovery can be detected before its Telegram send fails;
+that recovery remains queued and Healthchecks receives `/fail`. The previously
+sent incident remains visible on the handset. Telegram has no idempotent-send
+contract, so ambiguous delivery can duplicate a message with the same event ID.
+Do not use the local incident boolean as proof that a recovery was delivered.
 
-Create a root-owned 0600 `/etc/offsite-observer/config.json` from the example,
-replace all placeholders and configure the real exact responses. Create
-`provider.token` privately (root-owned 0600), with no token pasted into a terminal
-command or repository. Leave `enabled: false` until all acceptance gates pass.
-Validate the protected configuration using the dry-run command as root; dry-run
-is allowed as root because it performs no live action:
+Every native cycle reserves time for an event attempt and its final Healthchecks
+request. Pending events, including backoff, and any recorded event drops keep the
+Healthchecks check failed. A lost Healthchecks path opens `provider_path` after
+three failed cycles and queues Telegram notification; successful requests recover
+it after two cycles. New provider-path events are sent on the following cycle.
+A home outage alone does not stop successful execution heartbeats.
+
+## Update safely
+
+Arrange a monitoring maintenance window and preserve an encrypted backup first.
+Use a reviewed source revision and the same private inputs:
 
 ```sh
-sudo /usr/bin/python3 -B -m observer --config /etc/offsite-observer/config.json
+ANSIBLE_CONFIG=deploy/ansible.cfg ansible-playbook -i deploy/inventory.local.yml deploy/install.yml -e @/root/offsite-private/inputs.yml -e '{"observer_stop_for_update":true}'
 ```
 
-Run that command from `/opt/offsite-observer`. Never run the **live** service as
-root. Use the supplied unit for live execution. It loads protected config/token
-sources into the private credential directory of `offsite-observer` with
-`LoadCredential` and supplies the sandbox, deadline and resource controls. The
-CLI checks a matching credential-directory path and secure file properties but
-does not prove systemd supplied them; direct manual `--live` is not an accepted
-activation or verification path.
+Installation stops the timer and active workers before replacing files and leaves
+it disabled. Without explicit update consent, active/activating/deactivating/
+reloading workers cause refusal. Root-owned code/configuration cannot be symlinks,
+service writable or unexpectedly shared. Existing state is not erased or chowned
+away from an unexpected owner. Missing private input paths preserve existing
+configuration and credential sources; supplied paths deliberately replace them.
+Re-run preflight and acceptance/activation afterward.
 
-For private monitoring, install Tailscale separately from an approved upstream
-package. Configure its daemon for userspace operation and loopback-only proxy:
+For rollback, reinstall the prior reviewed source revision with the same process.
+The schema remains version 1. Preserve the current state before any restore;
+restoring older state can replay notifications or lose recent incident history.
+Do not clear state to make acceptance pass. If `spool_dropped` is nonzero, retain
+its evidence, investigate loss and reconcile outstanding messages before a
+separately approved state repair. There is no automatic reset/repair action.
 
-```text
-tailscaled --tun=userspace-networking --socks5-server=127.0.0.1:1055
-```
-
-This is a daemon configuration example, not an enrollment command. Authenticate
-privately without putting auth keys in argv or public source. Use a dedicated
-observer identity/tag approved by the tailnet administrator. Do not advertise
-subnet routes, accept broad LAN routes, act as an exit node, enable Tailscale SSH,
-Serve/Funnel or expose the proxy publicly. Policy must permit only the approved
-heartbeat host and TCP port. Verify both allowed reachability and denied hosts/
-ports through this proxy, with no direct-connect fallback. Those real policy
-tests cannot be completed using this generic source alone.
-
-Create root-owned 0600 `/etc/offsite-observer/private.token`. Add a root-owned
-systemd drop-in (through guest IaC) containing:
-
-```ini
-[Service]
-LoadCredential=private_token:/etc/offsite-observer/private.token
-```
-
-Set `private.enabled: true`, the exact private HTTPS DNS target and the configured
-loopback SOCKS port. The optional daemon is outside the observer unit and needs
-its own constrained state, resource and backup policy. Do not pass it a host TUN
-device. If disabled, this project makes no private-health claim. Disabling it
-does not close an already open `private_queue` incident: it remains open in local
-state and can receive its 24-hour reminder while event delivery is available.
-
-## Accept, enable, observe
-
-Complete [REVIEW.md](REVIEW.md), independently verify compatible webhook semantics,
-recipient delivery and external dead-man, then set `contract_verified: true` and
-`enabled: true` in the protected configuration. Separately authorize first live
-requests. Validate the unit with `systemd-analyze verify` on the actual guest.
-The review repository's successful unit tests are not guest/notification proof.
-
-```sh
-sudo systemctl daemon-reload
-sudo systemctl start offsite-observer.service
-sudo systemctl status offsite-observer.service
-sudo journalctl -u offsite-observer.service --since '-5 minutes'
-```
-
-The service logs only reduced evidence. Exit 2 means clock/provider or runtime
-failure; home incident state is reported in JSON and does not make every healthy
-execution a failed unit. A successful provider heartbeat means only that the
-pre-probe heartbeat was accepted, so inspect all outcomes, event delivery and
-private-disabled status.
-Unexpected sandbox/clock/credential errors are an activation stop. Verify no
-new public/inbound listening sockets, service UID/capabilities, writable paths,
-resource limits, timer non-overlap, configured latency and actual endpoint classes.
-
-After accepted first-cycle evidence and external notification tests:
-
-```sh
-sudo systemctl enable --now offsite-observer.timer
-sudo systemctl list-timers offsite-observer.timer
-```
-
-Only this explicit enable starts recurring traffic. Monitor `spool_dropped`,
-clock/provider failures and independent missing-heartbeat incidents. Deleting
-state forgets streaks/incidents; do not treat state as disposable during repairs.
-If a backward clock step causes persisted-state validation to stop cycles before
-the heartbeat, preserve the state, correct and verify the actual clock, and
-investigate the discrepancy before recovery. The external dead-man should alert
-while no heartbeat is sent. Before updates, disable timer, wait for the unit to
-stop, preserve state/config,
-install the reviewed source and repeat acceptance without broadening privileges.
+Changing optional private coverage requires a repeated install to update
+credential drop-ins. The observer installer does not own or remove Tailscale,
+home Caddy configuration or the separately installed canary. The optional
+`systemd/journald-retention.conf` is a guest-wide example: review other guest
+journals before applying its 64 MiB / 7-day bounds.
 
 ## Backup and isolated restore
 
-The hosting operator must configure encrypted daily guest/config backups with
-7-day / 4-week / 3-month retention and separately secure decryption material.
-Include protected config/token sources, local state and representative reduced
-journal evidence. Encryption configuration and recovery cannot be proven here.
+Use encrypted daily guest/config backups, with 7-day / 4-week / 3-month retention
+and separately protected decryption material. Include `/etc/offsite-observer`,
+`/var/lib/offsite-observer`, source revision identity, installed units/drop-ins and
+representative reduced journal evidence. State must be on local guest storage.
+Ansible does not invent or configure the hosting operator's backup destination.
 
-Quarterly, restore to an isolated clone with networking disabled **before boot**.
-Keep the observer timer disabled and run dry-run first. Restore source/config/
-state and verify ownership/modes and retained incident evidence. Revoke or replace
-tokens for a test clone; never allow production liveness/events from it. Prove
-the probe can start in dry-run without production contact. Only a separately
-authorized synthetic-network test should enable live execution. Record restore
-evidence and securely remove the clone and test credentials afterward.
+Quarterly restore to a clone with networking disabled **before boot**. Keep its
+timer disabled. Verify restored ownership/modes, configuration and retained
+incident state, then run the default dry-run (zero requests). Revoke or replace
+provider/private tokens before any connected test. Production and restore clones
+must never share active liveness credentials. Prove the restore independently;
+a successful source test is not restore evidence.
 
-## Stop and uninstall
+## Uninstall
 
-Uninstall requires host authorization. Preserve encrypted backup of state and
-config first; keep the stopped observer registered in external monitoring until
-its maintenance/decommission plan is agreed, or it will correctly dead-man alert.
-
-```sh
-sudo systemctl disable --now offsite-observer.timer
-sudo systemctl stop offsite-observer.service
-sudo systemctl is-active offsite-observer.service
-sudo systemctl is-enabled offsite-observer.timer
-```
-
-Expected stopped/disabled statuses may exit nonzero. After confirming no running
-worker, remove **only** this project's installed unit/drop-in and source paths,
-then run `systemctl daemon-reload`. Review and remove the optional journal policy
-only if it was installed specifically for this guest. Retain `/var/lib/offsite-observer`
-and `/etc/offsite-observer` until the operator approves their archived data deletion.
-Revoke dedicated provider/private tokens and the observer tailnet identity.
-Do not remove a shared Tailscale daemon, account or backup job blindly. The future
-hosting operator's IaC owns guest destruction and data-preservation decisions.
+Archive state/configuration in encrypted storage and arrange provider maintenance
+or retirement before stopping the observer; otherwise the dead-man should alert.
+Disable the timer and stop **all** `offsite-observer*.service` workers. After
+confirming they are stopped, remove only this project's unit/drop-in/source paths
+and reload systemd. Retain `/etc/offsite-observer` and `/var/lib/offsite-observer`
+until their deletion is separately approved. Revoke dedicated bot/private tokens
+and retire the Healthchecks check and optional tailnet identity. Do not blindly
+remove shared Tailscale packages, backup jobs, firewall rules or the guest.

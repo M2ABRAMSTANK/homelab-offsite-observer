@@ -1,0 +1,69 @@
+---
+# Separate optional play: run on the HOME reverse-proxy guest, not the offsite guest.
+- name: Install a loopback freshness canary behind an existing HTTPS edge
+  hosts: canary
+  become: true
+  gather_facts: true
+  vars:
+    canary_activate: false
+  tasks:
+    - name: Require one Debian host and typed activation
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+          - ansible_facts.distribution == 'Debian'
+          - ansible_facts.distribution_major_version in ['12', '13']
+          - canary_activate is boolean
+
+    - name: Refuse unsafe existing canary paths
+      ansible.builtin.script:
+        cmd: "{{ playbook_dir }}/../tools/guest_check.py --canary-paths-only"
+        executable: /usr/bin/python3
+      changed_when: false
+      check_mode: false
+
+    - name: Install Python
+      ansible.builtin.apt:
+        name: python3
+        state: present
+
+    - name: Create protected source directory
+      ansible.builtin.file:
+        path: /opt/offsite-canary
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install canary module
+      ansible.builtin.copy:
+        src: ../canary
+        dest: /opt/offsite-canary/
+        owner: root
+        group: root
+        mode: '0644'
+        directory_mode: '0755'
+      notify: Restart canary
+
+    - name: Install canary unit
+      ansible.builtin.copy:
+        src: ../systemd/offsite-canary.service
+        dest: /etc/systemd/system/offsite-canary.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart canary
+
+    - name: Reconcile explicit canary activation
+      ansible.builtin.systemd_service:
+        name: offsite-canary.service
+        daemon_reload: true
+        enabled: "{{ canary_activate }}"
+        state: "{{ 'started' if canary_activate else 'stopped' }}"
+
+  handlers:
+    - name: Restart canary
+      ansible.builtin.systemd_service:
+        name: offsite-canary.service
+        state: restarted
+      when: canary_activate

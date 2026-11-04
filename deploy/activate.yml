@@ -1,0 +1,60 @@
+---
+- name: Validate and explicitly activate a configured observer
+  hosts: observer
+  become: true
+  gather_facts: false
+  vars:
+    observer_activate: false
+  tasks:
+    - name: Require explicit activation of one guest
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+          - observer_activate is boolean
+          - observer_activate
+          - not ansible_check_mode
+        fail_msg: "Complete docs/DEPLOYMENT.md, then pass observer_activate=true as a JSON boolean."
+
+    - name: Recheck guest and protected paths
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, -B, /opt/offsite-observer/tools/guest_check.py]
+      changed_when: false
+
+    - name: Validate activation inputs without requests
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, -B, -m, tools.deployment_check, --activation]
+        chdir: /opt/offsite-observer
+      changed_when: false
+
+    - name: Verify installed units
+      ansible.builtin.command:
+        argv: [systemd-analyze, verify, /etc/systemd/system/offsite-observer.service, /etc/systemd/system/offsite-observer-preflight.service]
+      changed_when: false
+
+    - name: Verify real sandbox credentials state and clock without requests
+      ansible.builtin.systemd_service:
+        name: offsite-observer-preflight.service
+        daemon_reload: true
+        state: started
+
+    - name: Stop recurring monitoring during the acceptance cycle
+      ansible.builtin.systemd_service:
+        name: offsite-observer.timer
+        enabled: false
+        state: stopped
+
+    - name: Stop a current worker before the acceptance cycle
+      ansible.builtin.systemd_service:
+        name: offsite-observer.service
+        state: stopped
+
+    - name: Run first live cycle with strict outcomes before recurring execution
+      ansible.builtin.systemd_service:
+        name: offsite-observer-acceptance.service
+        state: started
+
+    - name: Enable recurring execution after successful first cycle
+      ansible.builtin.systemd_service:
+        name: offsite-observer.timer
+        enabled: true
+        state: started

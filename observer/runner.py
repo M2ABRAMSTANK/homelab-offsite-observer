@@ -5,6 +5,7 @@ import secrets
 import subprocess
 import time
 
+from . import providers
 from .checks import negative, utc, validate
 from .state import advance, bound, read, retry, write
 from .transport import request, Response
@@ -92,7 +93,11 @@ def cycle(cfg, credentials, directory):
     now = time.time()
     # This heartbeat describes observer execution, even when every home check fails.
     # Never replay/spool liveness: delayed heartbeats could conceal observer death.
-    provider_ok = _provider(cfg, credentials["provider_token"], {
+    native = providers.native(cfg)
+    # Native completion heartbeat is sent after persistence; reserve its budget
+    # before either probe phase and event dispatch. It never replays old liveness.
+    work_deadline = deadline - 2.5 if native else deadline
+    provider_ok = not state["events"] if native else _provider(cfg, credentials["provider_token"], {
         "schema": 1, "observer_id": cfg["observer_id"], "type": "heartbeat",
         "at": utc(now), "clock_trusted": trusted,
     }, secrets.token_hex(16), deadline, heartbeat=True)
@@ -105,7 +110,7 @@ def cycle(cfg, credentials, directory):
         jobs["private"] = {"url": cfg["private"]["url"], "proxy": cfg["private"]["socks_port"],
                            "headers": {"X-Observer-Nonce": nonce,
                                        "Authorization": f"Bearer {credentials['private_token']}"}}
-    responses = parallel(jobs, min(8, max(0, deadline - time.monotonic() - 0.3)))
+    responses = parallel(jobs, min(8, max(0, work_deadline - time.monotonic() - (2.3 if native else 0.3))))
     now = time.time()
     wan = (validate(responses["readiness"], "readiness", expected=cfg["readiness"]["expected"])
            and validate(responses["freshness"], "freshness", nonce=nonce, now=now, clock=trusted))
@@ -117,13 +122,13 @@ def cycle(cfg, credentials, directory):
     if wan:
         negatives = parallel({spec["name"]: {"url": spec["url"], "negative": True}
                               for spec in cfg["negative"]},
-                             min(8, max(0, deadline - time.monotonic() - 0.3)))
+                             min(8, max(0, work_deadline - time.monotonic() - (2.3 if native else 0.3))))
         outcomes = [negative(negatives[spec["name"]], spec) for spec in cfg["negative"]]
         exposure = False if False in outcomes else (True if all(v is True for v in outcomes) else None)
         responses.update({"negative_" + k: v for k, v in negatives.items()})
     now = time.time()
     for key, outcome in {"wan_edge": wan, "private_queue": private, "edge_exposure": exposure,
-                         "clock": trusted, "provider_path": provider_ok}.items():
+                         "clock": trusted, "provider_path": None if native else provider_ok}.items():
         advance(state, key, outcome, now, delivery_ok=provider_ok)
     bound(state, now)
     # Save before sending: a killed process may replay an event, never lose a newly opened incident.
@@ -131,11 +136,18 @@ def cycle(cfg, credentials, directory):
     delivered = 0
     # Preserve retained queue order; expiry can remove an undelivered incident.
     for event in list(state["events"]):
-        if event["next"] > now or deadline - time.monotonic() < 0.3:
+        if event["next"] > now or work_deadline - time.monotonic() < 0.3:
             break
         payload = {"schema": 1, "observer_id": cfg["observer_id"], "type": "event",
                    "id": event["id"], "key": event["key"], "event": event["event"], "at": event["at"]}
-        if _provider(cfg, credentials["provider_token"], payload, event["id"], deadline):
+        if native:
+            remaining = min(2, max(0, work_deadline - time.monotonic() - 0.15))
+            response = parallel({"provider": dict(providers.event_request(cfg, credentials, payload),
+                                                  timeout=remaining)}, remaining)["provider"]
+            accepted = providers.event_accepted(response, credentials)
+        else:
+            accepted = _provider(cfg, credentials["provider_token"], payload, event["id"], deadline)
+        if accepted:
             state["events"].remove(event)
             delivered += 1
         else:
@@ -143,6 +155,18 @@ def cycle(cfg, credentials, directory):
             break
     bound(state, now)
     write(directory, state)
+    if native:
+        remaining = min(2, max(0, deadline - time.monotonic() - 0.15))
+        response = parallel({"heartbeat": dict(providers.heartbeat_request(
+            credentials, failed=bool(state["events"] or state["dropped"])),
+            timeout=remaining)}, remaining)["heartbeat"]
+        provider_ok = providers.heartbeat_accepted(response)
+        # Observe a broken dead-man path through Telegram while it still works.
+        # Persist this outcome for streaks; any new event is sent next cycle.
+        delivery_ok = not state["events"] and provider_ok
+        advance(state, "provider_path", delivery_ok, time.time(), delivery_ok=delivery_ok)
+        bound(state, time.time())
+        write(directory, state)
     # Only fixed names/classes and aggregate counters are evidence. No URLs/body/headers.
     return {"schema": 1, "at": utc(now), "clock_trusted": trusted,
             "checks": {name: {"class": response.kind, "latency_ms": response.latency_ms}

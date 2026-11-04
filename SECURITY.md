@@ -1,9 +1,11 @@
 # Security boundary
 
-This source is an outbound-only monitoring client for code review. Its threat
+The observer is an outbound-only monitoring client with an explicit Ansible
+installation and activation workflow. Its threat
 model assumes a trusted hosting operator, root-managed code/configuration,
-trusted CA store, and independent notification infrastructure. No public listener,
-deployment, external host, credentials or provider acceptance is included.
+trusted CA store, and independent notification infrastructure. The observer has no inbound listener. The optional home-side canary binds only
+loopback behind existing TLS. No real host, credentials or provider acceptance
+is included in public source.
 
 Untrusted remote servers may return stale, oversized, malformed, compressed,
 misleading or slow responses. The runtime verifies TLS/hostname, nonce, schema,
@@ -29,3 +31,16 @@ For review findings, describe the affected code and reproduce with synthetic
 targets. Do not post real infrastructure names, addresses, tokens, recipient
 details, raw response bodies or production logs to public issues. Rotate any
 credential inadvertently exposed in source or issue history before reuse.
+
+
+Native Telegram uses a dedicated bot, not home queue credentials. Healthchecks
+uses a single-check UUID, not an account management key, and must notify through
+a non-Telegram integration. Bot token and ping UUID necessarily appear in their
+provider request URLs; never log requests or exception text. Host root and TLS
+providers can see these values, so keep proxy/debug tracing disabled. Telegram
+retries can duplicate messages; local observed recovery is not delivery proof.
+
+Ansible validates paths before replacing files, rejects unsupported guest
+privilege boundaries, and does not silently enable monitoring. Tests include
+secret redaction, wrong-recipient rejection, active-update refusal and path safety.
+See [validation evidence](docs/VALIDATION.md) for the limits of local checks.

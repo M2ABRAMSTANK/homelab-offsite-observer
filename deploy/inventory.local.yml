@@ -1,0 +1,9 @@
+---
+# Run inside the dedicated guest via its Proxmox console. No SSH server needed.
+all:
+  children:
+    observer:
+      hosts:
+        localhost:
+          ansible_connection: local
+          ansible_python_interpreter: /usr/bin/python3

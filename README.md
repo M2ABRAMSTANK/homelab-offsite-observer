@@ -1,75 +1,76 @@
 # Homelab off-site observer
 
-Reviewable version 1 of an outbound-only monitor for an independently hosted,
-unprivileged Debian LXC. It checks a public HTTPS edge, unexpected public exposure,
-and an optional private queue heartbeat through a loopback Tailscale SOCKS5 proxy.
-It sends events to an independently operated HTTPS notification adapter.
+An outbound-only monitor for an independently hosted, **unprivileged Debian LXC
+on Proxmox**. It checks public HTTPS readiness, response freshness and unintended
+public exposure, with an optional private queue check through Tailscale userspace
+networking. Incident and recovery messages go directly to a dedicated Telegram
+bot; Healthchecks.io independently detects observer loss or undelivered events.
+The home notification queue is not part of this delivery path.
 
-**Source for review, not a deployed or production-accepted service.** No host,
-provider, recipient, credentials, real target, or Tailscale enrollment is included.
-Examples use reserved `example.invalid` names. The example is disabled. This
-repository has independent history and contains no infrastructure inventory.
+**Includes an Ansible installer, explicit activation, provider acceptance tools,
+and a separately installable freshness canary.** Start with
+[the deployment guide](docs/DEPLOYMENT.md). You supply private targets and
+credentials; installing source leaves monitoring disabled. Installation readiness
+and successful tests do not mean an actual offsite guest or recipient has been
+verified. [Validation evidence and remaining field checks](docs/VALIDATION.md)
+state exactly what has been tested.
 
-## Try it without contacting anything
+## Install in the guest
 
-Requires Python 3.11+ on Linux or macOS; `openssl` is required for the test fixtures.
-There are no Python dependencies, install hooks, or import-time network actions.
+Create a dedicated Debian 12/13 unprivileged LXC (1 vCPU, 512 MiB RAM, 8 GiB local
+storage). Keep nesting, host devices, privileged mode and host mounts disabled.
+Use its Proxmox console; the observer does not require inbound SSH or public ports.
+From a reviewed checkout inside that guest, as root:
 
 ```sh
-make demo
-make test
+apt-get update
+apt-get install --no-install-recommends python3 ansible-core ca-certificates dbus systemd
+ANSIBLE_CONFIG=deploy/ansible.cfg ansible-playbook -i deploy/inventory.local.yml deploy/install.yml
 ```
 
-`make demo` validates the example and prints `mode: dry-run`,
-`network_requests: 0`, and `state_writes: 0`. Tests use mocks, child processes,
-temporary files and real TLS over local Unix socket pairs. They need no Internet,
-listening ports, production credentials or privileges. Local TLS certificates are
-generated in a temporary directory and removed afterward.
+This installs the application and hardened systemd units **disabled**. Follow the
+[configuration and activation steps](docs/DEPLOYMENT.md) to provide your private
+input files, check notification receipt, and start monitoring. No custom webhook
+adapter needs to be built. The older generic webhook interface remains available
+for existing integrations via `config.example.json`.
 
-## What to review
+## Test locally without external requests
 
-| Area | Entry point |
+Python 3.11+ and `openssl` are sufficient. No Python runtime dependencies.
+
+```sh
+make check
+make demo
+```
+
+Tests use mocks, temporary files and TLS over local socket pairs. The demo prints
+`network_requests: 0` and `state_writes: 0`. Live execution needs explicit activation,
+protected credentials and a non-root account. No imports install packages, enroll
+Tailscale or contact providers.
+
+| Need | Document |
 |---|---|
-| Boundaries, data flow, privileges, failure behavior | [Design](docs/DESIGN.md) |
-| Exact endpoint and webhook contracts | [Configuration](docs/CONFIGURATION.md) |
-| Guest preparation, disabled install, activation, uninstall | [Operations](docs/OPERATIONS.md) |
-| Acceptance evidence still required before deployment | [Review checklist](docs/REVIEW.md) |
-| Threats and disclosure boundary | [Security](SECURITY.md) |
-| HTTPS and SOCKS5 implementation | [transport.py](observer/transport.py) |
-| Freshness, schema and negative checks | [checks.py](observer/checks.py) |
-| Bounded execution and provider delivery | [runner.py](observer/runner.py) |
-| Independent incident machines and atomic spool | [state.py](observer/state.py) |
+| Friend/hosting operator installation and acceptance | [Deployment](docs/DEPLOYMENT.md) |
+| Schema, probes and native/legacy provider contracts | [Configuration](docs/CONFIGURATION.md) |
+| Privileges, data flow and failure handling | [Design](docs/DESIGN.md) |
+| Updates, backup, restore and removal | [Operations](docs/OPERATIONS.md) |
+| Security review and operational checks | [Review](docs/REVIEW.md), [Validation](docs/VALIDATION.md) |
+| Threat model and reporting | [Security](SECURITY.md) |
 
-The default CLI never activates live monitoring. Live execution requires `--live`,
-`enabled: true`, `provider.contract_verified: true`, a non-root runtime account,
-and protected configuration and token files. The supplied systemd unit uses
-`LoadCredential` to provide those files privately. The CLI verifies the
-`CREDENTIALS_DIRECTORY/config` path and secure credential-file properties; it
-does not authenticate its caller as systemd. Run live operation through the
-reviewed unit: a manual invocation does not receive its sandbox, time limit, or
-resource controls. The included timer is installed disabled by the documented
-procedure. No code opens a server socket or automatically installs/enrolls
-anything.
-
-A provider must independently evaluate missing heartbeats and deliver to verified
-recipients. A generic webhook 2xx response cannot prove handset delivery or a
-working external dead-man. Private monitoring is optional and visibly disabled
-until its endpoint, read-only token and exact tailnet grant are ready. This project
-does not send Telegram or perform containment/remediation.
-
-No redistribution license has been selected. Public review access does not imply
-a license grant; choose a license before promoting this as a reusable release.
+The private queue check stays off until a compatible authenticated endpoint and
+restricted tailnet grant exist. The supplied freshness canary belongs behind the
+**home** HTTPS edge, not on the observer. Neither component performs remediation.
+Telegram can duplicate a message after an ambiguous send; stable event IDs make
+retries identifiable. Healthchecks must use an independent email/push notification
+integration so a Telegram outage cannot silence both paths.
 
 ## Source workflow
 
-This independent repository is checked out as the `services/offsite-observer`
-submodule in its parent Homelab repository. GitLab is the primary repository
-(`origin`); GitLab pushes changes to this repository's GitHub mirror. Push source
-changes to `origin`, then verify mirror synchronization. The optional `github`
-remote is for inspection; routine changes go through GitLab.
+This independent repository is the `services/offsite-observer` submodule in the
+parent Homelab repository. GitLab `origin` is primary and mirrors to GitHub.
+Commit and push here only when authorized, verify the mirror, then separately
+update the parent pointer. Never copy private inventory, tokens, chat IDs, runtime
+configuration, state or production logs into public source or Git history.
 
-Commit service changes in this repository first, then update the parent
-repository's submodule pointer to the accepted commit. Keep private host details,
-credentials, deployment configuration and operational evidence outside this
-public source repository. A source push or submodule update does not activate
-monitoring or authorize a deployment.
+No redistribution license has been selected. Public review access alone is not
+a license grant; select one before offering a general reusable release.
